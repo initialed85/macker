@@ -1,0 +1,12 @@
+FROM scratch
+
+RUN set -eu; \
+    mkdir -p "$MACKER_ROOTFS/app"; \
+    cd "$MACKER_CONTEXT"; \
+    GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+        go build -o "$MACKER_ROOTFS/app/hello" ./example/hello; \
+    chmod 0755 "$MACKER_ROOTFS/app/hello"
+
+ENV PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+WORKDIR /
+ENTRYPOINT ["/app/hello"]

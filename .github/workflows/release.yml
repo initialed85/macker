@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.26.5'
+
+jobs:
+  build:
+    name: Build darwin/arm64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Check source
+        run: |
+          go test ./...
+          go vet ./...
+          sh -n test.sh
+          sh -n example/nginx/build-rootfs.sh
+
+      - name: Build Darwin arm64 binaries
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist/macker-darwin-arm64
+          go build -o dist/macker-darwin-arm64/darwin-oci ./cmd/darwin-oci
+          go build -o dist/macker-darwin-arm64/macker ./cmd/macker
+          file dist/macker-darwin-arm64/darwin-oci dist/macker-darwin-arm64/macker
+
+      - name: Package binaries
+        run: |
+          tar -C dist -czf macker-darwin-arm64.tar.gz macker-darwin-arm64
+          sha256sum macker-darwin-arm64.tar.gz > macker-darwin-arm64.tar.gz.sha256
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macker-darwin-arm64
+          path: |
+            macker-darwin-arm64.tar.gz
+            macker-darwin-arm64.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub release
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: macker-darwin-arm64
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256

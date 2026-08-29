@@ -1,0 +1,9 @@
+/bin/
+/example/image/
+/example/image.pulling/
+/example/nginx-image/
+/example/nginx-rootfs/
+/example/nginx-image.pulling/
+/example/rootfs/
+/darwin-oci
+/example.tar

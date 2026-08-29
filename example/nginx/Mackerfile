@@ -1,0 +1,56 @@
+FROM scratch
+
+# RUN executes on the macOS host with this repository as its working
+# directory. MACKER_ROOTFS points at the rootfs being assembled.
+RUN set -eu; \
+    test "$(uname -s)" = "Darwin"; \
+    command -v brew >/dev/null 2>&1; \
+    command -v install_name_tool >/dev/null 2>&1; \
+    command -v codesign >/dev/null 2>&1; \
+    rootfs="$MACKER_ROOTFS"; \
+    rm -rf "$rootfs"; \
+    mkdir -p "$rootfs/usr/local/bin" "$rootfs/usr/local/lib" "$rootfs/etc/nginx" "$rootfs/etc/ssl" "$rootfs/var/log/nginx" "$rootfs/var/run" "$rootfs/www"
+
+RUN set -eu; \
+    homebrew_prefix=$(brew --prefix); \
+    nginx_prefix=$(brew --prefix nginx); \
+    pcre2_prefix=$(brew --prefix pcre2); \
+    openssl_prefix=$(brew --prefix openssl@3); \
+    ca_certificates_prefix=$(brew --prefix ca-certificates); \
+    mime_source="$homebrew_prefix/etc/nginx/mime.types"; \
+    nginx_source="$nginx_prefix/bin/nginx"; \
+    pcre2_source="$pcre2_prefix/lib/libpcre2-8.0.dylib"; \
+    ssl_source="$openssl_prefix/lib/libssl.3.dylib"; \
+    crypto_source="$openssl_prefix/lib/libcrypto.3.dylib"; \
+    ca_source="$ca_certificates_prefix/share/ca-certificates/cacert.pem"; \
+    for file in "$nginx_source" "$pcre2_source" "$ssl_source" "$crypto_source" "$mime_source" "$ca_source"; do test -e "$file"; done; \
+    cp -L "$nginx_source" "$MACKER_ROOTFS/usr/local/bin/nginx"; \
+    cp -L "$pcre2_source" "$MACKER_ROOTFS/usr/local/lib/libpcre2-8.0.dylib"; \
+    cp -L "$ssl_source" "$MACKER_ROOTFS/usr/local/lib/libssl.3.dylib"; \
+    cp -L "$crypto_source" "$MACKER_ROOTFS/usr/local/lib/libcrypto.3.dylib"; \
+    cp -L example/nginx/volume.conf "$MACKER_ROOTFS/etc/nginx/nginx.conf"; \
+    cp -L "$mime_source" "$MACKER_ROOTFS/etc/nginx/mime.types"; \
+    cp -L "$ca_source" "$MACKER_ROOTFS/etc/ssl/cert.pem"
+
+RUN set -eu; \
+    pcre2_prefix=$(brew --prefix pcre2); \
+    openssl_prefix=$(brew --prefix openssl@3); \
+    nginx_binary="$MACKER_ROOTFS/usr/local/bin/nginx"; \
+    install_name_tool -change "$pcre2_prefix/lib/libpcre2-8.0.dylib" '@loader_path/../lib/libpcre2-8.0.dylib' "$nginx_binary"; \
+    install_name_tool -change "$openssl_prefix/lib/libssl.3.dylib" '@loader_path/../lib/libssl.3.dylib' "$nginx_binary"; \
+    install_name_tool -change "$openssl_prefix/lib/libcrypto.3.dylib" '@loader_path/../lib/libcrypto.3.dylib' "$nginx_binary"
+
+RUN set -eu; \
+    ssl_library="$MACKER_ROOTFS/usr/local/lib/libssl.3.dylib"; \
+    crypto_library="$MACKER_ROOTFS/usr/local/lib/libcrypto.3.dylib"; \
+    ssl_crypto_dependency=$(otool -L "$ssl_library" | awk '$1 ~ /libcrypto/ { print $1; exit }'); \
+    test -n "$ssl_crypto_dependency"; \
+    install_name_tool -change "$ssl_crypto_dependency" '@loader_path/libcrypto.3.dylib' "$ssl_library"; \
+    codesign --force --sign - "$MACKER_ROOTFS/usr/local/bin/nginx" "$MACKER_ROOTFS/usr/local/lib/libpcre2-8.0.dylib" "$ssl_library" "$crypto_library" >/dev/null; \
+    chmod 0755 "$MACKER_ROOTFS/usr/local/bin/nginx"; \
+    otool -L "$MACKER_ROOTFS/usr/local/bin/nginx"
+
+ENV SSL_CERT_FILE=/etc/ssl/cert.pem
+WORKDIR /
+ENTRYPOINT ["/usr/local/bin/nginx"]
+CMD ["-p", "./", "-c", "etc/nginx/nginx.conf"]

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -251,6 +252,7 @@ func commandOCIRun(args []string) error {
 	hostFallback := fs.Bool("host-fallback", false, "allow an image command to fall back to a host executable")
 	pidFile := fs.String("pid-file", "", "write the workload PID to this internal file")
 	entrypoint := fs.String("entrypoint", "", "override the image entrypoint")
+	statusFile := fs.String("status-file", "", "write internal workload exit information to this file")
 	fs.BoolVar(interactive, "interactive", false, "keep standard input open")
 	fs.BoolVar(tty, "tty", false, "attach the caller's terminal")
 	var env stringList
@@ -378,6 +380,7 @@ func commandOCIRun(args []string) error {
 		}
 		return fmt.Errorf("start %s: %w", imageCommand, err)
 	}
+	startedAt := time.Now().UTC()
 	if *pidFile != "" {
 		processGroup := 1
 		if *tty {
@@ -408,14 +411,126 @@ func commandOCIRun(args []string) error {
 		}
 	}()
 
-	if err := cmd.Wait(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("workload exited: %w", err)
+	waitErr := cmd.Wait()
+	finishedAt := time.Now().UTC()
+	exitInfo := processExitInfoFromState(cmd.Process.Pid, cmd.ProcessState, startedAt, finishedAt)
+	if *statusFile != "" {
+		if err := writeProcessExitInfo(*statusFile, exitInfo); err != nil {
+			if waitErr != nil {
+				return errors.Join(workloadExitErrorFor(waitErr, exitInfo), err)
+			}
+			return err
 		}
-		return err
+	}
+	if waitErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(waitErr, &exitErr) {
+			return workloadExitErrorFor(waitErr, exitInfo)
+		}
+		return waitErr
 	}
 	return nil
+}
+
+func workloadExitErrorFor(waitErr error, info processExitInfo) error {
+	return &workloadExitError{
+		err:  fmt.Errorf("workload exited: %w", waitErr),
+		info: info,
+	}
+}
+
+func processExitInfoFromState(pid int, state *os.ProcessState, startedAt, finishedAt time.Time) processExitInfo {
+	info := processExitInfo{
+		PID:               pid,
+		StartedAt:         startedAt,
+		FinishedAt:        finishedAt,
+		TerminationReason: "exited",
+	}
+	if state == nil {
+		info.TerminationReason = "unknown"
+		return info
+	}
+	waitStatus, ok := state.Sys().(syscall.WaitStatus)
+	if !ok {
+		code := state.ExitCode()
+		info.ExitCode = &code
+		return info
+	}
+	if waitStatus.Signaled() {
+		code := 128 + int(waitStatus.Signal())
+		info.ExitCode = &code
+		info.TerminationSignal = signalName(waitStatus.Signal())
+		info.TerminationReason = "signal"
+		return info
+	}
+	code := waitStatus.ExitStatus()
+	info.ExitCode = &code
+	if code != 0 {
+		info.TerminationReason = "exited-with-error"
+	}
+	return info
+}
+
+func signalName(signal syscall.Signal) string {
+	names := map[syscall.Signal]string{
+		syscall.SIGHUP:  "SIGHUP",
+		syscall.SIGINT:  "SIGINT",
+		syscall.SIGQUIT: "SIGQUIT",
+		syscall.SIGILL:  "SIGILL",
+		syscall.SIGABRT: "SIGABRT",
+		syscall.SIGFPE:  "SIGFPE",
+		syscall.SIGKILL: "SIGKILL",
+		syscall.SIGSEGV: "SIGSEGV",
+		syscall.SIGPIPE: "SIGPIPE",
+		syscall.SIGALRM: "SIGALRM",
+		syscall.SIGTERM: "SIGTERM",
+		syscall.SIGUSR1: "SIGUSR1",
+		syscall.SIGUSR2: "SIGUSR2",
+		syscall.SIGCHLD: "SIGCHLD",
+		syscall.SIGCONT: "SIGCONT",
+		syscall.SIGSTOP: "SIGSTOP",
+		syscall.SIGTSTP: "SIGTSTP",
+		syscall.SIGTTIN: "SIGTTIN",
+		syscall.SIGTTOU: "SIGTTOU",
+	}
+	if name, ok := names[signal]; ok {
+		return name
+	}
+	return fmt.Sprintf("SIG%d", signal)
+}
+
+func writeProcessExitInfo(path string, info processExitInfo) error {
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode workload exit information: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create workload status directory: %w", err)
+	}
+	temporary := path + ".tmp-" + strconv.Itoa(os.Getpid())
+	if err := os.WriteFile(temporary, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write workload exit information: %w", err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return fmt.Errorf("install workload exit information: %w", err)
+	}
+	return nil
+}
+
+func readProcessExitInfo(path string) (processExitInfo, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return processExitInfo{}, err
+	}
+	var info processExitInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return processExitInfo{}, fmt.Errorf("decode workload exit information: %w", err)
+	}
+	if info.PID <= 0 || info.FinishedAt.IsZero() {
+		return processExitInfo{}, errors.New("workload exit information is incomplete")
+	}
+	return info, nil
 }
 
 func buildImage(opts buildOptions) (err error) {

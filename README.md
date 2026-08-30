@@ -234,6 +234,23 @@ environment or directory changes made by the entrypoint. `logs` reads the captur
 detached run; foreground runs do not create a log file. `-t` uses the caller's
 terminal rather than providing process or filesystem isolation.
 
+Use `inspect` to retrieve lifecycle and exit information. The machine-readable
+form is stable JSON and refreshes detached exit state from the persisted status
+record before printing:
+
+```sh
+./bin/macker inspect --format json NAME
+# `--json NAME` is an alias
+```
+
+The JSON object includes `status` (`running`, `exited`, or `stopped`), the
+tracked launcher `pid`, the completed workload `workload_pid` when available,
+`exit_code` (including the conventional `128 + signal` value for signal
+termination), `started_at`, `finished_at`, `termination_signal`, and
+`termination_reason` (`exited`, `exited-with-error`, `signal`, or `stopped`).
+Detached `run` records this information when its OCI child exits; `inspect` and
+`ps` reconcile it into `metadata.json`.
+
 Use `macker rm --force NAME` to stop and remove a running container. `macker
 images` lists local images and `macker rmi IMAGE` removes an image layout;
 removing an image does not remove existing container rootfs directories.

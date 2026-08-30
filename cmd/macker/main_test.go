@@ -401,6 +401,74 @@ func testBundleDigest(value string) string {
 	return "sha256:" + hex.EncodeToString(hash[:])
 }
 
+func TestInspectJSONRefreshesPersistedExitInfo(t *testing.T) {
+	home := t.TempDir()
+	containerDir := filepath.Join(home, "containers", "demo")
+	if err := os.MkdirAll(containerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Unix(10, 0).UTC()
+	finishedAt := time.Unix(20, 0).UTC()
+	code := 7
+	if err := writeContainerMetadata(containerDir, containerMetadata{
+		Name:      "demo",
+		Image:     "docker.io/library/demo:latest",
+		CreatedAt: startedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProcessExitInfo(filepath.Join(containerDir, "exit.json"), processExitInfo{
+		PID:               42,
+		ExitCode:          &code,
+		StartedAt:         startedAt,
+		FinishedAt:        finishedAt,
+		TerminationSignal: "",
+		TerminationReason: "exited-with-error",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MACKER_HOME", home)
+
+	originalStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	commandErr := commandInspect([]string{"--format", "json", "demo"})
+	_ = writer.Close()
+	os.Stdout = originalStdout
+	output, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if commandErr != nil {
+		t.Fatal(commandErr)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var inspection containerInspection
+	if err := json.Unmarshal(output, &inspection); err != nil {
+		t.Fatalf("inspect output %q: %v", output, err)
+	}
+	if inspection.Status != "exited" || inspection.PID != 0 || inspection.WorkloadPID != 42 || inspection.ExitCode == nil || *inspection.ExitCode != 7 {
+		t.Fatalf("inspection = %#v", inspection)
+	}
+	if inspection.StartedAt == nil || inspection.FinishedAt == nil || inspection.TerminationReason != "exited-with-error" {
+		t.Fatalf("inspection timestamps/termination = %#v", inspection)
+	}
+	metadataBytes, err := os.ReadFile(filepath.Join(containerDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata containerMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.ExitPID != 42 || metadata.FinishedAt == nil {
+		t.Fatalf("metadata was not refreshed: %#v", metadata)
+	}
+}
+
 func TestLogsReadsCapturedOutput(t *testing.T) {
 	home := t.TempDir()
 	containerDir := filepath.Join(home, "containers", "demo")

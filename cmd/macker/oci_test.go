@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestEnsureTerminalEnvironment(t *testing.T) {
@@ -33,6 +35,60 @@ func TestMergeEnvironment(t *testing.T) {
 	want := []string{"PATH=/bin", "FOO=override", "EMPTY=", "NEW=value"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("environment = %#v, want %#v", got, want)
+	}
+}
+
+func TestProcessExitInfoFromState(t *testing.T) {
+	startedAt := time.Now().UTC()
+	command := exec.Command("/bin/sh", "-c", "exit 7")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	info := processExitInfoFromState(command.Process.Pid, command.ProcessState, startedAt, time.Now().UTC())
+	if info.PID <= 0 || info.ExitCode == nil || *info.ExitCode != 7 {
+		t.Fatalf("exit info = %#v", info)
+	}
+	if info.TerminationSignal != "" || info.TerminationReason != "exited-with-error" {
+		t.Fatalf("exit termination = signal %q reason %q", info.TerminationSignal, info.TerminationReason)
+	}
+
+	startedAt = time.Now().UTC()
+	command = exec.Command("/bin/sh", "-c", "kill -TERM $$")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("expected signal termination")
+	}
+	info = processExitInfoFromState(command.Process.Pid, command.ProcessState, startedAt, time.Now().UTC())
+	if info.ExitCode == nil || *info.ExitCode != 143 || info.TerminationSignal != "SIGTERM" || info.TerminationReason != "signal" {
+		t.Fatalf("signal info = %#v", info)
+	}
+}
+
+func TestProcessExitInfoRoundTrip(t *testing.T) {
+	code := 143
+	want := processExitInfo{
+		PID:               42,
+		ExitCode:          &code,
+		StartedAt:         time.Unix(10, 0).UTC(),
+		FinishedAt:        time.Unix(20, 0).UTC(),
+		TerminationSignal: "SIGTERM",
+		TerminationReason: "signal",
+	}
+	path := filepath.Join(t.TempDir(), "exit.json")
+	if err := writeProcessExitInfo(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readProcessExitInfo(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("exit info = %#v, want %#v", got, want)
 	}
 }
 

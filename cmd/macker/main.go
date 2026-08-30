@@ -107,20 +107,56 @@ type pfPortState struct {
 }
 
 type containerMetadata struct {
-	Name          string         `json:"name"`
-	Image         string         `json:"image"`
-	Network       string         `json:"network"`
-	Env           []string       `json:"env,omitempty"`
-	Volumes       []volume       `json:"volumes,omitempty"`
-	Ports         []portMapping  `json:"ports,omitempty"`
-	PFAnchor      string         `json:"pf_anchor,omitempty"`
-	PFToken       string         `json:"pf_token,omitempty"`
-	NetworkConfig *networkConfig `json:"network_config,omitempty"`
-	AutoRemove    bool           `json:"auto_remove,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
-	PID           int            `json:"pid,omitempty"`
-	LogPath       string         `json:"log_path,omitempty"`
-	StoppedAt     *time.Time     `json:"stopped_at,omitempty"`
+	Name              string         `json:"name"`
+	Image             string         `json:"image"`
+	Network           string         `json:"network"`
+	Env               []string       `json:"env,omitempty"`
+	Volumes           []volume       `json:"volumes,omitempty"`
+	Ports             []portMapping  `json:"ports,omitempty"`
+	PFAnchor          string         `json:"pf_anchor,omitempty"`
+	PFToken           string         `json:"pf_token,omitempty"`
+	NetworkConfig     *networkConfig `json:"network_config,omitempty"`
+	AutoRemove        bool           `json:"auto_remove,omitempty"`
+	CreatedAt         time.Time      `json:"created_at"`
+	StartedAt         *time.Time     `json:"started_at,omitempty"`
+	FinishedAt        *time.Time     `json:"finished_at,omitempty"`
+	PID               int            `json:"pid,omitempty"`
+	ExitPID           int            `json:"exit_pid,omitempty"`
+	ExitCode          *int           `json:"exit_code,omitempty"`
+	TerminationSignal string         `json:"termination_signal,omitempty"`
+	TerminationReason string         `json:"termination_reason,omitempty"`
+	LogPath           string         `json:"log_path,omitempty"`
+	StoppedAt         *time.Time     `json:"stopped_at,omitempty"`
+}
+
+type processExitInfo struct {
+	PID               int       `json:"pid"`
+	ExitCode          *int      `json:"exit_code"`
+	StartedAt         time.Time `json:"started_at"`
+	FinishedAt        time.Time `json:"finished_at"`
+	TerminationSignal string    `json:"termination_signal"`
+	TerminationReason string    `json:"termination_reason"`
+}
+
+type workloadExitError struct {
+	err  error
+	info processExitInfo
+}
+
+func (e *workloadExitError) Error() string { return e.err.Error() }
+func (e *workloadExitError) Unwrap() error { return e.err }
+
+type containerInspection struct {
+	Name              string     `json:"name"`
+	Image             string     `json:"image"`
+	Status            string     `json:"status"`
+	PID               int        `json:"pid"`
+	WorkloadPID       int        `json:"workload_pid"`
+	ExitCode          *int       `json:"exit_code"`
+	StartedAt         *time.Time `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at"`
+	TerminationSignal string     `json:"termination_signal"`
+	TerminationReason string     `json:"termination_reason"`
 }
 
 type imageRecord struct {
@@ -158,6 +194,8 @@ func main() {
 		err = commandExec(os.Args[2:])
 	case "logs":
 		err = commandLogs(os.Args[2:])
+	case "inspect":
+		err = commandInspect(os.Args[2:])
 	case "stop":
 		err = commandStop(os.Args[2:])
 	case "ps":
@@ -194,6 +232,7 @@ Usage:
   macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--env KEY=VALUE] [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
   macker exec [-i|--interactive] [-t|--tty] NAME [-- COMMAND ARG...]
   macker logs [-f|--follow] NAME
+  macker inspect [--format json|table] NAME
   macker stop NAME
   macker rm [-f|--force] NAME
   macker ps [-a|--all]
@@ -1108,6 +1147,7 @@ func commandRun(args []string) error {
 		}
 		pfInstalled = true
 	}
+	startedAt := time.Now().UTC()
 	metadata := containerMetadata{
 		Name:          *name,
 		Image:         ref.Normalized,
@@ -1120,8 +1160,10 @@ func commandRun(args []string) error {
 		Env:           append([]string(nil), rawEnv...),
 		AutoRemove:    *autoRemove,
 		CreatedAt:     time.Now().UTC(),
+		StartedAt:     &startedAt,
 	}
-	ociRunArgs := []string{"--skip-unpack", "--rootfs", rootfs}
+	exitPath := filepath.Join(containerDir, "exit.json")
+	ociRunArgs := []string{"--skip-unpack", "--rootfs", rootfs, "--status-file", exitPath}
 	if *interactive {
 		ociRunArgs = append(ociRunArgs, "--interactive")
 	}
@@ -1179,6 +1221,14 @@ func commandRun(args []string) error {
 	}
 	setupComplete = true
 	runErr := commandOCIRun(ociRunArgs)
+	if info, infoErr := readProcessExitInfo(exitPath); infoErr == nil {
+		applyProcessExitInfo(&metadata, info)
+	} else {
+		var workloadErr *workloadExitError
+		if errors.As(runErr, &workloadErr) {
+			applyProcessExitInfo(&metadata, workloadErr.info)
+		}
+	}
 	pfInstalled = false
 	networkInstalled = false
 	metadata.PID = 0
@@ -1425,6 +1475,146 @@ func commandLogs(args []string) error {
 	}
 }
 
+func commandInspect(args []string) error {
+	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	format := fs.String("format", "table", "output format: table or json")
+	jsonOutput := fs.Bool("json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("inspect requires exactly one container name")
+	}
+	name := fs.Arg(0)
+	if !validContainerName(name) {
+		return fmt.Errorf("invalid container name %q", name)
+	}
+	home, err := mackerHome()
+	if err != nil {
+		return err
+	}
+	containerDir := filepath.Join(home, "containers", name)
+	metadataPath := filepath.Join(containerDir, "metadata.json")
+	metadataBytes, err := os.ReadFile(metadataPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("container %q was not found", name)
+		}
+		return fmt.Errorf("read container metadata: %w", err)
+	}
+	var metadata containerMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		return fmt.Errorf("decode container metadata: %w", err)
+	}
+	changed, err := refreshContainerExitInfo(containerDir, &metadata)
+	if err != nil {
+		return fmt.Errorf("refresh container %q exit information: %w", name, err)
+	}
+	if changed {
+		if err := writeContainerMetadata(containerDir, metadata); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	status, err := containerStatus(metadata)
+	if err != nil {
+		return fmt.Errorf("inspect container %q: %w", name, err)
+	}
+	inspection := containerInspection{
+		Name:              metadata.Name,
+		Image:             metadata.Image,
+		Status:            status,
+		PID:               metadata.PID,
+		WorkloadPID:       metadata.ExitPID,
+		ExitCode:          metadata.ExitCode,
+		StartedAt:         metadata.StartedAt,
+		FinishedAt:        metadata.FinishedAt,
+		TerminationSignal: metadata.TerminationSignal,
+		TerminationReason: metadata.TerminationReason,
+	}
+	if *jsonOutput {
+		*format = "json"
+	}
+	switch strings.ToLower(*format) {
+	case "json":
+		data, err := json.MarshalIndent(inspection, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encode container inspection: %w", err)
+		}
+		fmt.Println(string(data))
+		return nil
+	case "table", "text":
+		fmt.Printf("Name: %s\\n", inspection.Name)
+		fmt.Printf("Image: %s\\n", inspection.Image)
+		fmt.Printf("Status: %s\\n", inspection.Status)
+		fmt.Printf("PID: %d\\n", inspection.PID)
+		fmt.Printf("Workload PID: %d\\n", inspection.WorkloadPID)
+		if inspection.ExitCode == nil {
+			fmt.Println("Exit code: -")
+		} else {
+			fmt.Printf("Exit code: %d\\n", *inspection.ExitCode)
+		}
+		fmt.Printf("Started: %s\\n", inspectionTime(inspection.StartedAt))
+		fmt.Printf("Finished: %s\\n", inspectionTime(inspection.FinishedAt))
+		fmt.Printf("Termination signal: %s\\n", valueOrDash(inspection.TerminationSignal))
+		fmt.Printf("Termination reason: %s\\n", valueOrDash(inspection.TerminationReason))
+		return nil
+	default:
+		return fmt.Errorf("unsupported inspect format %q; use table or json", *format)
+	}
+}
+
+func refreshContainerExitInfo(containerDir string, metadata *containerMetadata) (bool, error) {
+	info, err := readProcessExitInfo(filepath.Join(containerDir, "exit.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if metadata.PID > 0 {
+		alive, err := processAlive(metadata.PID)
+		if err != nil {
+			return false, err
+		}
+		if alive {
+			return false, nil
+		}
+	}
+	applyProcessExitInfo(metadata, info)
+	return true, nil
+}
+
+func applyProcessExitInfo(metadata *containerMetadata, info processExitInfo) {
+	startedAt := info.StartedAt
+	finishedAt := info.FinishedAt
+	metadata.StartedAt = &startedAt
+	metadata.FinishedAt = &finishedAt
+	metadata.ExitPID = info.PID
+	if info.ExitCode == nil {
+		metadata.ExitCode = nil
+	} else {
+		code := *info.ExitCode
+		metadata.ExitCode = &code
+	}
+	metadata.TerminationSignal = info.TerminationSignal
+	metadata.TerminationReason = info.TerminationReason
+}
+
+func inspectionTime(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return "-"
+	}
+	return value.Format(time.RFC3339Nano)
+}
+
+func valueOrDash(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
 func commandStop(args []string) error {
 	if len(args) != 1 {
 		return errors.New("stop requires exactly one container name")
@@ -1449,6 +1639,9 @@ func commandStop(args []string) error {
 	var metadata containerMetadata
 	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
 		return fmt.Errorf("decode container metadata: %w", err)
+	}
+	if _, err := refreshContainerExitInfo(containerDir, &metadata); err != nil {
+		return fmt.Errorf("refresh container %q exit information: %w", name, err)
 	}
 	if err := stopExecProcesses(containerDir); err != nil {
 		return err
@@ -1492,7 +1685,17 @@ func commandStop(args []string) error {
 	if err := cleanupContainerResources(home, name, &metadata); err != nil {
 		return err
 	}
+	if _, err := refreshContainerExitInfo(containerDir, &metadata); err != nil {
+		return fmt.Errorf("refresh container %q exit information: %w", name, err)
+	}
 
+	if metadata.FinishedAt == nil {
+		finishedAt := time.Now().UTC()
+		metadata.FinishedAt = &finishedAt
+		metadata.ExitPID = metadata.PID
+		metadata.TerminationSignal = "SIGTERM"
+		metadata.TerminationReason = "stopped"
+	}
 	metadata.PID = 0
 	stoppedAt := time.Now().UTC()
 	metadata.StoppedAt = &stoppedAt
@@ -1626,6 +1829,10 @@ func commandPS(args []string) error {
 			if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
 				return fmt.Errorf("decode container %q metadata: %w", name, err)
 			}
+			exitInfoChanged, err := refreshContainerExitInfo(filepath.Join(home, "containers", name), &metadata)
+			if err != nil {
+				return fmt.Errorf("refresh container %q exit information: %w", name, err)
+			}
 			status, err := containerStatus(metadata)
 			if err != nil {
 				return fmt.Errorf("inspect container %q: %w", name, err)
@@ -1639,6 +1846,9 @@ func commandPS(args []string) error {
 				if err := cleanupContainerResources(home, name, &metadata); err != nil {
 					return err
 				}
+				exitInfoChanged = true
+			}
+			if exitInfoChanged {
 				if err := writeContainerMetadata(filepath.Join(home, "containers", name), metadata); err != nil {
 					if errors.Is(err, os.ErrNotExist) {
 						delete(state.Containers, name)
@@ -1816,6 +2026,9 @@ func containerStatus(metadata containerMetadata) (string, error) {
 	}
 	if metadata.StoppedAt != nil {
 		return "stopped", nil
+	}
+	if metadata.FinishedAt != nil {
+		return "exited", nil
 	}
 	return "running", nil
 }

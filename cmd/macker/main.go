@@ -110,6 +110,7 @@ type containerMetadata struct {
 	Name          string         `json:"name"`
 	Image         string         `json:"image"`
 	Network       string         `json:"network"`
+	Env           []string       `json:"env,omitempty"`
 	Volumes       []volume       `json:"volumes,omitempty"`
 	Ports         []portMapping  `json:"ports,omitempty"`
 	PFAnchor      string         `json:"pf_anchor,omitempty"`
@@ -190,7 +191,7 @@ Usage:
   macker push IMAGE
   macker pull IMAGE
   macker bundle [--no-push] SOURCE DARWIN-IMAGE
-  macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
+  macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--env KEY=VALUE] [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
   macker exec [-i|--interactive] [-t|--tty] NAME [-- COMMAND ARG...]
   macker logs [-f|--follow] NAME
   macker stop NAME
@@ -956,6 +957,8 @@ func commandRun(args []string) error {
 	fs.BoolVar(interactive, "interactive", false, "keep standard input open")
 	fs.BoolVar(tty, "tty", false, "attach the caller's terminal")
 	entrypoint := fs.String("entrypoint", "", "override the image entrypoint")
+	var rawEnv stringList
+	fs.Var(&rawEnv, "env", "environment variable KEY=VALUE (repeatable)")
 	var rawVolumes stringList
 	fs.Var(&rawVolumes, "v", "host path and container path, HOST:CONTAINER (repeatable)")
 	var rawPorts stringList
@@ -1078,7 +1081,17 @@ func commandRun(args []string) error {
 	if err := commandOCIUnpack([]string{"--force", "--output", rootfs, layout}); err != nil {
 		return err
 	}
-	if replacedFiles, err := substituteMackerConfig(rootfs, networkEnvironmentValues(networkCfg, ports)); err != nil {
+	runtimeEnvironment := make(map[string]string, len(rawEnv)+4+len(ports))
+	for _, value := range rawEnv {
+		key, envValue, ok := strings.Cut(value, "=")
+		if ok && key != "" {
+			runtimeEnvironment[key] = envValue
+		}
+	}
+	for key, value := range networkEnvironmentValues(networkCfg, ports) {
+		runtimeEnvironment[key] = value
+	}
+	if replacedFiles, err := substituteMackerConfig(rootfs, runtimeEnvironment); err != nil {
 		return fmt.Errorf("configure container rootfs: %w", err)
 	} else if replacedFiles > 0 {
 		fmt.Fprintf(os.Stderr, "substituted Macker tokens in %d config file(s)\n", replacedFiles)
@@ -1104,6 +1117,7 @@ func commandRun(args []string) error {
 		PFAnchor:      pfState.Anchor,
 		PFToken:       pfState.Token,
 		NetworkConfig: &networkCfg,
+		Env:           append([]string(nil), rawEnv...),
 		AutoRemove:    *autoRemove,
 		CreatedAt:     time.Now().UTC(),
 	}
@@ -1113,6 +1127,9 @@ func commandRun(args []string) error {
 	}
 	if *tty {
 		ociRunArgs = append(ociRunArgs, "--tty")
+	}
+	for _, value := range rawEnv {
+		ociRunArgs = append(ociRunArgs, "--env", value)
 	}
 	ociRunArgs = append(ociRunArgs, networkEnvironmentArgs(networkCfg, ports)...)
 	if *entrypoint != "" {
@@ -1256,6 +1273,9 @@ func commandExec(args []string) error {
 	}
 	if *tty {
 		ociArgs = append(ociArgs, "--tty")
+	}
+	for _, value := range metadata.Env {
+		ociArgs = append(ociArgs, "--env", value)
 	}
 	if metadata.NetworkConfig != nil {
 		ociArgs = append(ociArgs, networkEnvironmentArgs(*metadata.NetworkConfig, metadata.Ports)...)

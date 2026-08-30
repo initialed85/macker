@@ -132,7 +132,9 @@ application behaviour across platforms.
 ## Running workloads
 
 `run` requires explicit `--net=host` or `--net=external` networking and a
-name. Foreground runs inherit the terminal for output; use `-i` to attach
+name. Repeat `--env KEY=VALUE` to add or override image environment values;
+these values are persisted with the container and inherited by `exec`. Foreground
+runs inherit the terminal for output; use `-i` to attach
 standard input and `-t` to attach the caller's terminal (`-it` is the usual
 interactive shell form). TTY runs preserve an image or explicit `TERM`;
 otherwise they pass through the caller's `TERM` or use the safe

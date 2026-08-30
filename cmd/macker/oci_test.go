@@ -28,6 +28,14 @@ func TestEnsureTerminalEnvironment(t *testing.T) {
 	}
 }
 
+func TestMergeEnvironment(t *testing.T) {
+	got := mergeEnvironment([]string{"PATH=/bin", "FOO=image", "EMPTY="}, []string{"FOO=override", "NEW=value", "INVALID"})
+	want := []string{"PATH=/bin", "FOO=override", "EMPTY=", "NEW=value"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("environment = %#v, want %#v", got, want)
+	}
+}
+
 func TestSelectImageCommandEntrypointOverride(t *testing.T) {
 	got := selectImageCommand("bash", []string{"/usr/local/bin/nginx"}, []string{"--serve"}, nil, []string{"-c", "env"})
 	want := []string{"bash", "-c", "env"}

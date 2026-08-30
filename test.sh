@@ -258,6 +258,8 @@ ENTRYPOINT_STARTED=1
     --net=host \
     --name "$ENTRYPOINT_CONTAINER" \
     -p "$DEBUG_HOST_PORT:$NGINX_PORT" \
+    --env MACKER_TEST_ONE=one \
+    --env MACKER_TEST_TWO=two \
     --entrypoint bash \
     "$NGINX_IMAGE" \
     -c 'env' > "$ENTRYPOINT_ENV"
@@ -266,6 +268,8 @@ grep -q '^MACKER_IP=172\.31\.' "$ENTRYPOINT_ENV"
 grep -q '^MACKER_HOST_INTERFACE=bridge88$' "$ENTRYPOINT_ENV"
 grep -q '^MACKER_HOST_IP=172\.31\.88\.1$' "$ENTRYPOINT_ENV"
 grep -q "^MACKER_PORT_1=$NGINX_PORT$" "$ENTRYPOINT_ENV"
+grep -q '^MACKER_TEST_ONE=one$' "$ENTRYPOINT_ENV"
+grep -q '^MACKER_TEST_TWO=two$' "$ENTRYPOINT_ENV"
 if grep -q '^MACKER_PORT=' "$ENTRYPOINT_ENV"; then
     echo 'legacy MACKER_PORT unexpectedly present' >&2
     exit 1
@@ -283,6 +287,8 @@ echo "==> starting bundled Darwin nginx container $CONTAINER detached"
     --net=host \
     --name "$CONTAINER" \
     -p "$PORT:$NGINX_PORT" \
+    --env MACKER_TEST_ONE=one \
+    --env MACKER_TEST_TWO=two \
     -v "$WEBROOT:/usr/share/nginx/html" \
     "$NGINX_IMAGE"
 STARTED=1
@@ -291,8 +297,8 @@ echo '==> listing running containers'
 "$MACKER" ps
 
 echo '==> executing a command in the running container'
-"$MACKER" exec -it "$CONTAINER" -- /bin/sh -c 'printf macker-exec-ok\\n' > "$EXEC_OUTPUT" 2>/dev/null
-grep -q 'macker-exec-ok' "$EXEC_OUTPUT"
+"$MACKER" exec -it "$CONTAINER" -- /bin/sh -c 'printf macker-exec-ok:%s:%s\\n "$MACKER_TEST_ONE" "$MACKER_TEST_TWO"' > "$EXEC_OUTPUT" 2>/dev/null
+grep -q 'macker-exec-ok:one:two' "$EXEC_OUTPUT"
 printf 'macker-stdin-ok\\n' | "$MACKER" exec -it "$CONTAINER" -- /bin/sh -c 'read line; printf stdin=%s\\n "$line"' > "$EXEC_STDIN_OUTPUT" 2>/dev/null
 grep -q 'stdin=macker-stdin-ok' "$EXEC_STDIN_OUTPUT"
 

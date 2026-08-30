@@ -538,6 +538,7 @@ func TestContainerStateRoundTrip(t *testing.T) {
 		Name:      "demo",
 		Image:     "docker.io/library/demo:latest",
 		Network:   "host",
+		Env:       []string{"FOO=bar", "MULTI=one"},
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := writeContainerMetadata(containerDir, metadata); err != nil {
@@ -545,6 +546,17 @@ func TestContainerStateRoundTrip(t *testing.T) {
 	}
 	if err := registerContainerState(home, "demo"); err != nil {
 		t.Fatal(err)
+	}
+	metadataData, err := os.ReadFile(filepath.Join(containerDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip containerMetadata
+	if err := json.Unmarshal(metadataData, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(roundTrip.Env, metadata.Env) {
+		t.Fatalf("metadata env = %#v, want %#v", roundTrip.Env, metadata.Env)
 	}
 
 	data, err := os.ReadFile(filepath.Join(home, "state.json"))

@@ -2624,12 +2624,15 @@ func formatPortMappings(ports []portMapping) string {
 }
 
 // macOS's default /etc/pf.conf exposes com.apple/* as a dynamic rdr anchor.
-// Keep one child anchor per container so Macker can replace and flush mappings
-// without touching the main PF ruleset.
+// Keep one short, deterministic child anchor per container so Macker can
+// replace and flush mappings without touching the main PF ruleset. PF anchor
+// names are length-limited, so do not embed the user-controlled container name
+// directly; the metadata stores the generated name for teardown.
 const pfAnchorPrefix = "com.apple/macker-"
 
 func pfAnchorForContainer(name string) string {
-	return pfAnchorPrefix + name
+	digest := sha256.Sum256([]byte(name))
+	return pfAnchorPrefix + hex.EncodeToString(digest[:])[:32]
 }
 
 func installPFPortMappings(name, targetIP string, ports []portMapping) (pfPortState, error) {

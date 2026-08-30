@@ -182,6 +182,23 @@ func TestBuildPFRulesForTargetIP(t *testing.T) {
 	}
 }
 
+func TestPFAnchorForContainerIsShortAndDeterministic(t *testing.T) {
+	name := strings.Repeat("native-container-", 20)
+	anchor := pfAnchorForContainer(name)
+	if len(anchor) > 63 {
+		t.Fatalf("PF anchor length = %d, want <= 63: %q", len(anchor), anchor)
+	}
+	if !strings.HasPrefix(anchor, pfAnchorPrefix) {
+		t.Fatalf("PF anchor %q does not have prefix %q", anchor, pfAnchorPrefix)
+	}
+	if anchor != pfAnchorForContainer(name) {
+		t.Fatal("PF anchor is not deterministic")
+	}
+	if anchor == pfAnchorForContainer(name+"-other") {
+		t.Fatal("different container names produced the same PF anchor")
+	}
+}
+
 func TestParsePFToken(t *testing.T) {
 	got, err := parsePFToken([]byte("pf enabled\nToken : 123456789\n"))
 	if err != nil {

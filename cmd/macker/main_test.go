@@ -133,6 +133,8 @@ func TestParsePortMapping(t *testing.T) {
 		{input: "80:30080", want: portMapping{HostPort: 80, NodePort: 30080, Protocol: "tcp"}},
 		{input: "53:30553/UDP", want: portMapping{HostPort: 53, NodePort: 30553, Protocol: "udp"}},
 		{input: "1:65535/tcp", want: portMapping{HostPort: 1, NodePort: 65535, Protocol: "tcp"}},
+		{input: "8080:auto", want: portMapping{HostPort: 8080, NodePort: 0, Protocol: "tcp"}},
+		{input: "8080:0/udp", want: portMapping{HostPort: 8080, NodePort: 0, Protocol: "udp"}},
 		{input: "0:30080", wantErr: true},
 		{input: "80:65536", wantErr: true},
 		{input: "80:30080/sctp", wantErr: true},
@@ -169,6 +171,14 @@ func TestBuildPFRulesIncludesTCPAndUDP(t *testing.T) {
 		if !strings.Contains(rules, line) {
 			t.Fatalf("PF rules do not contain %q:\n%s", line, rules)
 		}
+	}
+}
+
+func TestBuildPFRulesForTargetIP(t *testing.T) {
+	rules := buildPFRulesForTargetIP("10.42.8.3", []portMapping{{HostPort: 8080, NodePort: 31543, Protocol: "tcp"}})
+	want := "rdr pass inet proto tcp from any to 10.42.8.3 port = 8080 -> 10.42.8.3 port 31543"
+	if !strings.Contains(rules, want) {
+		t.Fatalf("target-IP PF rules do not contain %q:\n%s", want, rules)
 	}
 }
 
@@ -248,6 +258,54 @@ func TestCheckPublishedPortConflicts(t *testing.T) {
 	}
 	if err := checkPublishedPortConflicts(home, "new", []portMapping{{HostPort: 80, NodePort: 30081, Protocol: "udp"}}); err != nil {
 		t.Fatalf("different protocol should not conflict: %v", err)
+	}
+}
+
+func TestCheckPublishedPortConflictsAllowsDistinctExternalTargets(t *testing.T) {
+	home := t.TempDir()
+	containerDir := filepath.Join(home, "containers", "existing")
+	if err := os.MkdirAll(containerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeContainerMetadata(containerDir, containerMetadata{
+		Name:          "existing",
+		Network:       "external",
+		NetworkConfig: &networkConfig{Interface: "bridge101", IP: "10.42.8.3"},
+		Ports:         []portMapping{{HostPort: 8080, NodePort: 31543, Protocol: "tcp"}},
+		PFAnchor:      pfAnchorForContainer("existing"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerContainerState(home, "existing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkPublishedPortConflictsForTarget(home, "new", "10.42.8.4", []portMapping{{HostPort: 8080, NodePort: 31544, Protocol: "tcp"}}); err != nil {
+		t.Fatalf("distinct external target should allow host port reuse: %v", err)
+	}
+	if err := checkPublishedPortConflictsForTarget(home, "new", "10.42.8.3", []portMapping{{HostPort: 8080, NodePort: 31544, Protocol: "tcp"}}); err == nil {
+		t.Fatal("same external target should conflict")
+	}
+}
+
+func TestResolveNodePorts(t *testing.T) {
+	ports := []portMapping{
+		{HostPort: 8080, NodePort: 0, Protocol: "tcp"},
+		{HostPort: 8081, NodePort: 0, Protocol: "tcp"},
+		{HostPort: 5353, NodePort: 0, Protocol: "udp"},
+	}
+	if err := resolveNodePorts(t.TempDir(), "new", ports); err != nil {
+		t.Fatal(err)
+	}
+	for index, port := range ports {
+		if port.NodePort < autoNodePortMin || port.NodePort > autoNodePortMax {
+			t.Fatalf("ports[%d] = %#v, outside automatic range", index, port)
+		}
+		if port.NodePort == 0 {
+			t.Fatalf("ports[%d] was not allocated", index)
+		}
+	}
+	if ports[0].NodePort == ports[1].NodePort {
+		t.Fatalf("TCP automatic node ports were duplicated: %#v", ports)
 	}
 }
 
@@ -413,6 +471,7 @@ func TestInspectJSONRefreshesPersistedExitInfo(t *testing.T) {
 	if err := writeContainerMetadata(containerDir, containerMetadata{
 		Name:      "demo",
 		Image:     "docker.io/library/demo:latest",
+		Ports:     []portMapping{{HostPort: 8080, NodePort: 31543, Protocol: "tcp"}},
 		CreatedAt: startedAt,
 	}); err != nil {
 		t.Fatal(err)
@@ -452,6 +511,9 @@ func TestInspectJSONRefreshesPersistedExitInfo(t *testing.T) {
 	}
 	if inspection.Status != "exited" || inspection.PID != 0 || inspection.WorkloadPID != 42 || inspection.ExitCode == nil || *inspection.ExitCode != 7 {
 		t.Fatalf("inspection = %#v", inspection)
+	}
+	if !reflect.DeepEqual(inspection.Ports, []portMapping{{HostPort: 8080, NodePort: 31543, Protocol: "tcp"}}) {
+		t.Fatalf("inspection ports = %#v", inspection.Ports)
 	}
 	if inspection.StartedAt == nil || inspection.FinishedAt == nil || inspection.TerminationReason != "exited-with-error" {
 		t.Fatalf("inspection timestamps/termination = %#v", inspection)

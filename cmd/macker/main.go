@@ -147,16 +147,17 @@ func (e *workloadExitError) Error() string { return e.err.Error() }
 func (e *workloadExitError) Unwrap() error { return e.err }
 
 type containerInspection struct {
-	Name              string     `json:"name"`
-	Image             string     `json:"image"`
-	Status            string     `json:"status"`
-	PID               int        `json:"pid"`
-	WorkloadPID       int        `json:"workload_pid"`
-	ExitCode          *int       `json:"exit_code"`
-	StartedAt         *time.Time `json:"started_at"`
-	FinishedAt        *time.Time `json:"finished_at"`
-	TerminationSignal string     `json:"termination_signal"`
-	TerminationReason string     `json:"termination_reason"`
+	Name              string        `json:"name"`
+	Image             string        `json:"image"`
+	Status            string        `json:"status"`
+	PID               int           `json:"pid"`
+	WorkloadPID       int           `json:"workload_pid"`
+	ExitCode          *int          `json:"exit_code"`
+	StartedAt         *time.Time    `json:"started_at"`
+	FinishedAt        *time.Time    `json:"finished_at"`
+	TerminationSignal string        `json:"termination_signal"`
+	TerminationReason string        `json:"termination_reason"`
+	Ports             []portMapping `json:"ports"`
 }
 
 type imageRecord struct {
@@ -1001,8 +1002,8 @@ func commandRun(args []string) error {
 	var rawVolumes stringList
 	fs.Var(&rawVolumes, "v", "host path and container path, HOST:CONTAINER (repeatable)")
 	var rawPorts stringList
-	fs.Var(&rawPorts, "p", "publish HOST_PORT:NODE_PORT[/tcp|/udp] (repeatable)")
-	fs.Var(&rawPorts, "publish", "publish HOST_PORT:NODE_PORT[/tcp|/udp] (repeatable)")
+	fs.Var(&rawPorts, "p", "publish HOST_PORT:NODE_PORT[/tcp|/udp] (NODE_PORT may be auto or 0)")
+	fs.Var(&rawPorts, "publish", "publish HOST_PORT:NODE_PORT[/tcp|/udp] (NODE_PORT may be auto or 0)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1068,7 +1069,14 @@ func commandRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := checkPublishedPortConflicts(home, *name, ports); err != nil {
+	if err := resolveNodePorts(home, *name, ports); err != nil {
+		return err
+	}
+	conflictTargetIP := ""
+	if *network == "external" {
+		conflictTargetIP = *podIP
+	}
+	if err := checkPublishedPortConflictsForTarget(home, *name, conflictTargetIP, ports); err != nil {
 		return err
 	}
 	layout := imageLayoutPath(home, ref)
@@ -1141,7 +1149,11 @@ func commandRun(args []string) error {
 		}
 	}
 	if len(ports) > 0 {
-		pfState, err = installPFPortMappings(*name, networkCfg.IP, ports)
+		if *network == "external" {
+			pfState, err = installPFPortMappingsForTargetIP(*name, networkCfg.IP, ports)
+		} else {
+			pfState, err = installPFPortMappings(*name, networkCfg.IP, ports)
+		}
 		if err != nil {
 			return err
 		}
@@ -1531,6 +1543,7 @@ func commandInspect(args []string) error {
 		FinishedAt:        metadata.FinishedAt,
 		TerminationSignal: metadata.TerminationSignal,
 		TerminationReason: metadata.TerminationReason,
+		Ports:             append([]portMapping{}, metadata.Ports...),
 	}
 	if *jsonOutput {
 		*format = "json"
@@ -2506,6 +2519,10 @@ func parseVolume(raw string) (volume, error) {
 }
 
 func checkPublishedPortConflicts(home, name string, ports []portMapping) error {
+	return checkPublishedPortConflictsForTarget(home, name, "", ports)
+}
+
+func checkPublishedPortConflictsForTarget(home, name, targetIP string, ports []portMapping) error {
 	if len(ports) == 0 {
 		return nil
 	}
@@ -2528,6 +2545,12 @@ func checkPublishedPortConflicts(home, name string, ports []portMapping) error {
 				return fmt.Errorf("decode container %q metadata: %w", otherName, err)
 			}
 			if metadata.PFAnchor == "" {
+				continue
+			}
+			// External target-IP rules can reuse a host port when the
+			// destination IP differs. Host-mode rules still reserve the
+			// port globally, as they match any local destination.
+			if targetIP != "" && metadata.Network == "external" && metadata.NetworkConfig != nil && metadata.NetworkConfig.IP != "" && metadata.NetworkConfig.IP != targetIP {
 				continue
 			}
 			for _, port := range metadata.Ports {
@@ -2562,11 +2585,18 @@ func parsePortMapping(raw string) (portMapping, error) {
 	if err != nil {
 		return portMapping{}, fmt.Errorf("invalid host port in %q: %w", raw, err)
 	}
-	nodePort, err := parsePortNumber(parts[1])
+	nodePort, err := parseNodePortNumber(parts[1])
 	if err != nil {
 		return portMapping{}, fmt.Errorf("invalid node port in %q: %w", raw, err)
 	}
 	return portMapping{HostPort: hostPort, NodePort: nodePort, Protocol: protocol}, nil
+}
+
+func parseNodePortNumber(value string) (uint16, error) {
+	if strings.EqualFold(strings.TrimSpace(value), "auto") || value == "0" {
+		return 0, nil
+	}
+	return parsePortNumber(value)
 }
 
 func parsePortNumber(value string) (uint16, error) {
@@ -2602,7 +2632,15 @@ func pfAnchorForContainer(name string) string {
 	return pfAnchorPrefix + name
 }
 
-func installPFPortMappings(name, targetIP string, ports []portMapping) (state pfPortState, err error) {
+func installPFPortMappings(name, targetIP string, ports []portMapping) (pfPortState, error) {
+	return installPFPortMappingsWithDestination(name, "", targetIP, ports)
+}
+
+func installPFPortMappingsForTargetIP(name, targetIP string, ports []portMapping) (pfPortState, error) {
+	return installPFPortMappingsWithDestination(name, targetIP, targetIP, ports)
+}
+
+func installPFPortMappingsWithDestination(name, destinationIP, targetIP string, ports []portMapping) (state pfPortState, err error) {
 	if runtime.GOOS != "darwin" {
 		return state, errors.New("port publishing requires a Darwin host with pfctl")
 	}
@@ -2632,7 +2670,7 @@ func installPFPortMappings(name, targetIP string, ports []portMapping) (state pf
 	}
 	rulesPath := rulesFile.Name()
 	defer os.Remove(rulesPath)
-	if _, err := rulesFile.WriteString(buildPFRules(targetIP, ports)); err != nil {
+	if _, err := rulesFile.WriteString(buildPFRulesForDestination(destinationIP, targetIP, ports)); err != nil {
 		_ = rulesFile.Close()
 		return state, fmt.Errorf("write PF rules: %w", err)
 	}
@@ -2677,11 +2715,22 @@ func isStalePFTokenError(err error) bool {
 }
 
 func buildPFRules(targetIP string, ports []portMapping) string {
+	return buildPFRulesForDestination("", targetIP, ports)
+}
+
+func buildPFRulesForTargetIP(targetIP string, ports []portMapping) string {
+	return buildPFRulesForDestination(targetIP, targetIP, ports)
+}
+
+func buildPFRulesForDestination(destinationIP, targetIP string, ports []portMapping) string {
+	if destinationIP == "" {
+		destinationIP = "any"
+	}
 	var rules strings.Builder
 	for _, port := range ports {
 		// Omitting an interface makes PF evaluate the redirect on all
 		// interfaces, including interfaces that Macker does not know about yet.
-		fmt.Fprintf(&rules, "rdr pass inet proto %s from any to any port = %d -> %s port %d\n", port.Protocol, port.HostPort, targetIP, port.NodePort)
+		fmt.Fprintf(&rules, "rdr pass inet proto %s from any to %s port = %d -> %s port %d\n", port.Protocol, destinationIP, port.HostPort, targetIP, port.NodePort)
 	}
 	return rules.String()
 }

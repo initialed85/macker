@@ -173,14 +173,22 @@ prints a warning when it does so. Chroot execution does not use that fallback.
 Use Docker-style
 `-p HOST_PORT:NODE_PORT[/tcp|/udp]` to publish a port through macOS PF.
 `NODE_PORT` is the port the workload actually listens on; the default protocol
-is TCP. Publishing uses the workload bridge IP as the PF destination
-and rules without an interface restriction, so it currently covers ingress on
-any interface. Macker uses macOS's existing dynamic PF anchor and does not
-replace the main ruleset. Repeat `-p` for additional mappings, such as
-`-p 53:30553/udp`. This initial implementation is IPv4-only and does not add
-special VXLAN or bridge-member handling. PF redirects ingress traffic; a
-connection from the Mac to its own published address may require testing from
-another host.
+is TCP. Use `auto` or `0` for `NODE_PORT` to allocate a random free port in the
+Kubernetes-style `30000-32767` range. The resolved port is injected through
+`MACKER_PORT_N`, persisted in container metadata, and returned by
+`inspect --format json` under `ports`.
+
+Host-mode rules retain the existing any-destination behavior. External
+attached-network rules match the supplied workload IP as the PF destination,
+then redirect that IP and `HOST_PORT` to the workload's `NODE_PORT`. This lets
+multiple external workloads reuse the same `HOST_PORT` when their target IPs
+differ, while automatic node-port allocation prevents native wildcard
+listeners from colliding on the host. Macker uses macOS's existing dynamic PF
+anchor and does not replace the main ruleset. Repeat `-p` for additional
+mappings, such as `-p 53:30553/udp`. This initial implementation is IPv4-only
+and does not add special VXLAN or bridge-member handling. PF redirects ingress
+traffic; a connection from the Mac to its own published address may require
+testing from another host.
 
 ```sh
 mkdir -p /tmp/macker-www
@@ -248,6 +256,8 @@ tracked launcher `pid`, the completed workload `workload_pid` when available,
 `exit_code` (including the conventional `128 + signal` value for signal
 termination), `started_at`, `finished_at`, `termination_signal`, and
 `termination_reason` (`exited`, `exited-with-error`, `signal`, or `stopped`).
+The object also includes `ports`, an array of `{host_port, node_port, protocol}`
+objects containing resolved mappings (including automatically allocated ports).
 Detached `run` records this information when its OCI child exits; `inspect` and
 `ps` reconcile it into `metadata.json`.
 

@@ -9,10 +9,11 @@ NGINX_ROOTFS := example/nginx-rootfs
 NGINX_IMAGE := example/nginx-image
 NGINX_PULL_LAYOUT := $(NGINX_IMAGE).pulling
 NGINX_CONFIG := example/nginx/nginx.conf
+ECHO_IMAGE ?= initialed85/echo-server:latest
 REGISTRY_IMAGE ?=
 SKOPEO ?= skopeo
 
-.PHONY: all build macker hello image nginx-rootfs nginx nginx-run nginx-push nginx-pull inspect unpack run push pull test clean
+.PHONY: all build macker hello image nginx-rootfs nginx nginx-run nginx-push nginx-pull echo-server echo-server-push echo-server-bundle inspect unpack run push pull test clean
 
 all: image
 
@@ -105,6 +106,18 @@ nginx-pull: build
 		oci:$(NGINX_PULL_LAYOUT):latest
 	@rm -rf "$(NGINX_IMAGE)"
 	@mv "$(NGINX_PULL_LAYOUT)" "$(NGINX_IMAGE)"
+
+echo-server: build
+	$(MACKER) build \
+		-f example/echo-server/Mackerfile \
+		-t $(ECHO_IMAGE) \
+		.
+
+echo-server-push: echo-server
+	$(MACKER) push $(ECHO_IMAGE)
+
+echo-server-bundle: echo-server
+	$(MACKER) bundle ealen/echo-server:latest $(ECHO_IMAGE)
 
 test:
 	go test ./...

@@ -228,9 +228,9 @@ fall back to the host shell in non-chroot mode:
 ```
 
 `exec` requires a running detached container, starts an additional process
-with the image environment, working directory, network values, and materialized
-rootfs, and defaults to `/bin/sh`. It does not inherit environment or directory
-changes made by the entrypoint. `logs` reads the captured stdout/stderr of a
+with the image and run-supplied environment, working directory, network values,
+and materialized rootfs, and defaults to `/bin/sh`. It does not inherit
+environment or directory changes made by the entrypoint. `logs` reads the captured stdout/stderr of a
 detached run; foreground runs do not create a log file. `-t` uses the caller's
 terminal rather than providing process or filesystem isolation.
 
@@ -259,6 +259,34 @@ The nginx Macker image listens on port `8080`, serves a directory listing, and
 uses `/usr/share/nginx/html` as its volume-backed document root. It is built
 from `scratch` and does not include `bash`; a shell entrypoint therefore
 requires an image that contains a shell (or a suitable host volume).
+
+The Echo-Server example builds the upstream [Ealenn/Echo-Server](https://github.com/Ealenn/Echo-Server)
+`0.9.2` release into a native Darwin image. Its pinned build downloads the
+official Node `22.23.2` arm64 Darwin runtime, runs the upstream webpack build,
+and packages the resulting bundle plus `global.json`:
+
+```sh
+make echo-server
+./bin/macker run --net=host --name=echo-server \
+  -p 8080:80 \
+  initialed85/echo-server:latest
+curl http://127.0.0.1:8080/
+./bin/macker stop echo-server
+```
+
+Authenticate Skopeo before publishing. `make echo-server-push` publishes the
+Darwin image directly; `make echo-server-bundle` additionally merges the
+upstream `ealen/echo-server:latest` Linux manifests and publishes the resulting
+multi-platform image at `initialed85/echo-server:latest`:
+
+```sh
+skopeo login docker.io
+make echo-server-bundle
+```
+
+The example build runs on Apple Silicon macOS and needs network access to
+GitHub and nodejs.org. As with all Macker workloads, this is a trusted native
+process rather than an isolated macOS container.
 
 For the direct OCI hello experiment, use the `macker oci` subcommands:
 

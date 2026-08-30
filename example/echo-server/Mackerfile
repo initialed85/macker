@@ -1,0 +1,13 @@
+FROM scratch
+
+# Echo-Server is bundled by upstream webpack; this downloads the pinned
+# release, builds it with the official arm64 Darwin Node distribution, and
+# copies only the native Node runtime plus the application bundle.
+RUN sh "$MACKER_CONTEXT/example/echo-server/build.sh" "$MACKER_ROOTFS"
+
+ENV PATH=/usr/local/bin:/usr/bin:/bin
+ENV NODE_ENV=production
+ENV PORT=80
+WORKDIR /
+ENTRYPOINT ["/usr/local/bin/node", "app/webserver.js"]
+EXPOSE 80

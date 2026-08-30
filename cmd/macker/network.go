@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,68 @@ func setupMackerNetwork(home string) (networkConfig, error) {
 
 	cleanupNewHost()
 	return networkConfig{}, fmt.Errorf("no free Macker bridge interface is available in bridge881..bridge88%d", mackerNetworkLimit)
+}
+
+func setupExternalMackerNetwork(interfaceName, ip, hostInterface, hostIP string) (networkConfig, error) {
+	if runtime.GOOS != "darwin" {
+		return networkConfig{}, errors.New("network setup requires a Darwin host")
+	}
+	return validateExternalMackerNetwork(interfaceName, ip, hostInterface, hostIP)
+}
+
+func validateExternalMackerNetwork(interfaceName, ip, hostInterface, hostIP string) (networkConfig, error) {
+	if hostInterface == "" && hostIP != "" {
+		return networkConfig{}, errors.New("external network --host-ip requires --host-interface")
+	}
+	if hostInterface != "" && hostIP == "" {
+		return networkConfig{}, errors.New("external network --host-interface requires --host-ip")
+	}
+	if err := validateExistingMackerAddress(interfaceName, ip, "external network", "--interface", "--ip"); err != nil {
+		return networkConfig{}, err
+	}
+	config := networkConfig{
+		Interface: interfaceName,
+		IP:        ip,
+	}
+	if hostInterface != "" {
+		if err := validateExistingMackerAddress(hostInterface, hostIP, "external network host", "--host-interface", "--host-ip"); err != nil {
+			return networkConfig{}, err
+		}
+		config.HostInterface = hostInterface
+		config.HostIP = hostIP
+	}
+	return config, nil
+}
+
+func validateExistingMackerAddress(interfaceName, ip, description, interfaceFlag, ipFlag string) error {
+	if interfaceName == "" {
+		return fmt.Errorf("%s requires %s IFACE", description, interfaceFlag)
+	}
+	if strings.TrimSpace(interfaceName) != interfaceName || strings.ContainsAny(interfaceName, "/\t\r\n") || strings.HasPrefix(interfaceName, "-") {
+		return fmt.Errorf("invalid %s interface %q", description, interfaceName)
+	}
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil || parsedIP.To4() == nil || ip == "" || strings.TrimSpace(ip) != ip {
+		return fmt.Errorf("%s requires an IPv4 %s POD_IP, got %q", description, ipFlag, ip)
+	}
+	if normalized := parsedIP.To4().String(); normalized != ip {
+		return fmt.Errorf("%s %s must be a canonical IPv4 address, got %q", description, ipFlag, ip)
+	}
+	exists, err := mackerInterfaceExists(interfaceName)
+	if err != nil {
+		return fmt.Errorf("inspect %s interface %q: %w", description, interfaceName, err)
+	}
+	if !exists {
+		return fmt.Errorf("%s interface %q does not exist", description, interfaceName)
+	}
+	hasAddress, err := mackerInterfaceHasAddress(interfaceName, ip)
+	if err != nil {
+		return fmt.Errorf("inspect address %s on %s interface %q: %w", ip, description, interfaceName, err)
+	}
+	if !hasAddress {
+		return fmt.Errorf("%s interface %q does not have address %s", description, interfaceName, ip)
+	}
+	return nil
 }
 
 func ensureMackerHostBridge(home string) (owned, created bool, err error) {

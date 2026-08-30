@@ -213,6 +213,18 @@ func TestNetworkEnvironmentArgs(t *testing.T) {
 	if got := formatNetworkConfig(nil); got != "" {
 		t.Fatalf("nil network = %q", got)
 	}
+
+	external := networkConfig{Interface: "bridge101", IP: "10.42.1.3"}
+	got = networkEnvironmentArgs(external, nil)
+	want = []string{
+		"--env", "MACKER_INTERFACE=bridge101",
+		"--env", "MACKER_IP=10.42.1.3",
+		"--env", "MACKER_HOST_INTERFACE=",
+		"--env", "MACKER_HOST_IP=",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("external environment args = %#v, want %#v", got, want)
+	}
 }
 
 func TestCheckPublishedPortConflicts(t *testing.T) {

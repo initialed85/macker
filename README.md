@@ -131,18 +131,20 @@ application behaviour across platforms.
 
 ## Running workloads
 
-`run` requires explicit host networking and a name. Foreground runs inherit the
-terminal for output; use `-i` to attach standard input and `-t` to attach the
-caller's terminal (`-it` is the usual interactive shell form). TTY runs preserve
-an image or explicit `TERM`; otherwise they pass through the caller's `TERM` or
-use the safe `xterm-256color` default. Interactive runs must stay in the foreground. Detached runs write to
+`run` requires explicit `--net=host` or `--net=external` networking and a
+name. Foreground runs inherit the terminal for output; use `-i` to attach
+standard input and `-t` to attach the caller's terminal (`-it` is the usual
+interactive shell form). TTY runs preserve an image or explicit `TERM`;
+otherwise they pass through the caller's `TERM` or use the safe
+`xterm-256color` default. Interactive runs must stay in the foreground. Detached runs write to
 `~/.macker/containers/<name>/run.log` (or the corresponding `MACKER_HOME` path).
 Add `--rm` to remove the container rootfs, metadata, and state entry after a
-foreground exit or when `stop`/`ps` observes
-the workload exit. Network setup requires root or passwordless
-`sudo` because Macker creates host bridge interfaces.
+foreground exit or when `stop`/`ps` observes the workload exit. Host-network
+setup requires root or passwordless `sudo` because Macker creates host bridge
+interfaces. External networking only inspects an existing interface and
+address; PF publishing still requires root or passwordless `sudo`.
 
-Each high-level `run` creates or reuses the host-side `bridge88` with
+In host mode, each high-level `run` creates or reuses the host-side `bridge88` with
 `172.31.88.1/24`, then allocates a per-container bridge beginning at `bridge881`
 with `172.31.89.1/24`, `172.31.90.1/24`, and so on. This stays within the
 RFC1918 private `172.16.0.0/12` range while avoiding the commonly used `10.0.0.0/8`
@@ -152,8 +154,11 @@ no members or VXLAN plumbing yet.
 
 Macker supplies the workload with `MACKER_INTERFACE`, `MACKER_IP`,
 `MACKER_HOST_INTERFACE`, and `MACKER_HOST_IP` (for example, `bridge881` and
-`172.31.89.1`). For each published mapping it
-also supplies `MACKER_PORT_1`, `MACKER_PORT_2`, and so on, containing the
+`172.31.89.1`). In external mode, `MACKER_INTERFACE` and `MACKER_IP` are the
+supplied existing interface and Pod IP; host-owned values are empty because
+Macker does not own or infer that network's gateway, unless optional
+`--host-interface IFACE --host-ip HOST_IP` values are supplied. For each published mapping
+it also supplies `MACKER_PORT_1`, `MACKER_PORT_2`, and so on, containing the
 workload-side port. The workload is expected—but cannot be forced—to bind only
 to its supplied IP and ports.
 
@@ -189,6 +194,23 @@ printf 'hello from a Macker volume\n' > /tmp/macker-www/index.html
 
 ./bin/macker ps
 ./bin/macker stop nginx
+```
+
+For a network already attached by another component, such as maclet, pass the
+existing interface and Pod IP explicitly. Macker validates both and does not
+create or destroy any `bridge88*` interface in this mode. Optional host interface
+and IP values can also be supplied when the attached network exposes them:
+
+```sh
+./bin/macker run \
+  --net=external \
+  --interface bridge101 \
+  --ip 10.42.1.3 \
+  --host-interface bridge101 \
+  --host-ip 10.42.1.1 \
+  --name=nginx \
+  -p 80:8080/tcp \
+  initialed85/nginx-darwin:latest
 ```
 
 For an interactive debug shell, use an image containing a shell or let Macker

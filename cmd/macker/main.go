@@ -190,7 +190,7 @@ Usage:
   macker push IMAGE
   macker pull IMAGE
   macker bundle [--no-push] SOURCE DARWIN-IMAGE
-  macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host --name=NAME [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
+  macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
   macker exec [-i|--interactive] [-t|--tty] NAME [-- COMMAND ARG...]
   macker logs [-f|--follow] NAME
   macker stop NAME
@@ -200,7 +200,7 @@ Usage:
   macker rmi IMAGE
 
 Storage defaults to ~/.macker. Set MACKER_HOME to use another location.
-Only FROM scratch images and host networking are supported.`)
+Only FROM scratch images and host or explicitly attached external networking are supported.`)
 }
 
 func commandBuild(args []string) error {
@@ -942,7 +942,11 @@ func commandRun(args []string) error {
 	args = expandInteractiveShortFlags(args)
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	network := fs.String("net", "", "network mode; only host is supported")
+	network := fs.String("net", "", "network mode: host or external")
+	interfaceName := fs.String("interface", "", "existing external network interface (required with --net=external)")
+	podIP := fs.String("ip", "", "existing IPv4 Pod IP on --interface (required with --net=external)")
+	hostInterface := fs.String("host-interface", "", "existing external network host interface (optional with --net=external)")
+	hostIP := fs.String("host-ip", "", "existing IPv4 external network host IP (optional with --net=external)")
 	name := fs.String("name", "", "required container name")
 	detach := fs.Bool("d", false, "run in the background")
 	autoRemove := fs.Bool("rm", false, "remove the container after it exits")
@@ -960,8 +964,20 @@ func commandRun(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *network != "host" {
-		return errors.New("run requires --net=host; other network modes are not implemented")
+	switch *network {
+	case "host":
+		if *interfaceName != "" || *podIP != "" || *hostInterface != "" || *hostIP != "" {
+			return errors.New("--interface, --ip, --host-interface, and --host-ip require --net=external")
+		}
+	case "external":
+		if *interfaceName == "" || *podIP == "" {
+			return errors.New("--net=external requires --interface IFACE and --ip POD_IP")
+		}
+		if (*hostInterface == "") != (*hostIP == "") {
+			return errors.New("--net=external requires both --host-interface IFACE and --host-ip HOST_IP when either is provided")
+		}
+	default:
+		return errors.New("run requires --net=host or --net=external")
 	}
 	if *detach && (*interactive || *tty) {
 		return errors.New("interactive and tty runs cannot be detached")
@@ -1049,7 +1065,11 @@ func commandRun(args []string) error {
 		}
 	}()
 
-	networkCfg, err = setupMackerNetwork(home)
+	if *network == "external" {
+		networkCfg, err = setupExternalMackerNetwork(*interfaceName, *podIP, *hostInterface, *hostIP)
+	} else {
+		networkCfg, err = setupMackerNetwork(home)
+	}
 	if err != nil {
 		return err
 	}

@@ -5,5 +5,4 @@
 /example/nginx-rootfs/
 /example/nginx-image.pulling/
 /example/rootfs/
-/darwin-oci
 /example.tar

@@ -1,7 +1,6 @@
 SHELL := /bin/sh
 
 DARWIN_ARCH ?= arm64
-TOOL := bin/darwin-oci
 MACKER := bin/macker
 ROOTFS := example/rootfs
 IMAGE := example/image
@@ -19,10 +18,9 @@ all: image
 
 build:
 	mkdir -p bin
-	go build -o $(TOOL) ./cmd/darwin-oci
+	go build -o $(MACKER) ./cmd/macker
 
 macker: build
-	go build -o $(MACKER) ./cmd/macker
 
 hello:
 	rm -rf $(ROOTFS)
@@ -31,7 +29,7 @@ hello:
 
 image: build hello
 	rm -rf $(IMAGE)
-	$(TOOL) build \
+	$(MACKER) oci build \
 		--rootfs $(ROOTFS) \
 		--output $(IMAGE) \
 		--tag hello-darwin:latest \
@@ -44,7 +42,7 @@ nginx-rootfs:
 
 nginx: build nginx-rootfs
 	rm -rf $(NGINX_IMAGE)
-	$(TOOL) build \
+	$(MACKER) oci build \
 		--rootfs $(NGINX_ROOTFS) \
 		--output $(NGINX_IMAGE) \
 		--tag nginx-darwin:latest \
@@ -57,18 +55,18 @@ nginx: build nginx-rootfs
 		--workdir /
 
 nginx-run: build nginx
-	$(TOOL) run $(NGINX_IMAGE)
+	$(MACKER) oci run --env MACKER_PORT_1=8080 $(NGINX_IMAGE)
 
 inspect: build image
-	$(TOOL) inspect --tag hello-darwin:latest $(IMAGE)
+	$(MACKER) oci inspect --tag hello-darwin:latest $(IMAGE)
 
 unpack: build image
-	rm -rf /tmp/darwin-oci-rootfs
-	$(TOOL) unpack --tag hello-darwin:latest --output /tmp/darwin-oci-rootfs $(IMAGE)
-	find /tmp/darwin-oci-rootfs -maxdepth 3 -print
+	rm -rf /tmp/macker-rootfs
+	$(MACKER) oci unpack --tag hello-darwin:latest --output /tmp/macker-rootfs $(IMAGE)
+	find /tmp/macker-rootfs -maxdepth 3 -print
 
 run: build image
-	$(TOOL) run --arg hello --arg from --arg an --arg OCI --arg layout $(IMAGE)
+	$(MACKER) oci run --arg hello --arg from --arg an --arg OCI --arg layout $(IMAGE)
 
 push: image
 	@test -n "$(REGISTRY_IMAGE)" || { echo "set REGISTRY_IMAGE, for example: make push REGISTRY_IMAGE=ghcr.io/OWNER/hello-darwin:latest" >&2; exit 2; }

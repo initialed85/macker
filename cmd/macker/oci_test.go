@@ -6,9 +6,47 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 )
+
+func TestEnsureTerminalEnvironment(t *testing.T) {
+	t.Setenv("TERM", "screen-256color")
+	got := ensureTerminalEnvironment([]string{"PATH=/bin"})
+	if environmentValue(got, "TERM") != "screen-256color" {
+		t.Fatalf("TERM = %q, want caller TERM", environmentValue(got, "TERM"))
+	}
+	if environmentValue(ensureTerminalEnvironment([]string{"TERM=custom"}), "TERM") != "custom" {
+		t.Fatal("explicit TERM was overwritten")
+	}
+
+	t.Setenv("TERM", "")
+	got = ensureTerminalEnvironment([]string{"PATH=/bin"})
+	if environmentValue(got, "TERM") != "xterm-256color" {
+		t.Fatalf("fallback TERM = %q, want xterm-256color", environmentValue(got, "TERM"))
+	}
+}
+
+func TestSelectImageCommandEntrypointOverride(t *testing.T) {
+	got := selectImageCommand("bash", []string{"/usr/local/bin/nginx"}, []string{"--serve"}, nil, []string{"-c", "env"})
+	want := []string{"bash", "-c", "env"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command = %#v, want %#v", got, want)
+	}
+
+	got = selectImageCommand("bash", []string{"/usr/local/bin/nginx"}, []string{"--serve"}, nil, nil)
+	want = []string{"bash", "--serve"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command without override = %#v, want %#v", got, want)
+	}
+
+	got = selectImageCommand("", []string{"/usr/local/bin/nginx"}, []string{"--serve"}, nil, []string{"/custom", "arg"})
+	want = []string{"/custom", "arg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command override = %#v, want %#v", got, want)
+	}
+}
 
 func TestBuildAndUnpackRoundTrip(t *testing.T) {
 	rootfs := t.TempDir()

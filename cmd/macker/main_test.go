@@ -4,8 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +121,121 @@ func TestInstallVolumeUsesLiveSymlink(t *testing.T) {
 	}
 	if link != host {
 		t.Fatalf("volume link = %q, want %q", link, host)
+	}
+}
+
+func TestParsePortMapping(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    portMapping
+		wantErr bool
+	}{
+		{input: "80:30080", want: portMapping{HostPort: 80, NodePort: 30080, Protocol: "tcp"}},
+		{input: "53:30553/UDP", want: portMapping{HostPort: 53, NodePort: 30553, Protocol: "udp"}},
+		{input: "1:65535/tcp", want: portMapping{HostPort: 1, NodePort: 65535, Protocol: "tcp"}},
+		{input: "0:30080", wantErr: true},
+		{input: "80:65536", wantErr: true},
+		{input: "80:30080/sctp", wantErr: true},
+		{input: "80", wantErr: true},
+		{input: "80:30080/tcp/udp", wantErr: true},
+	}
+	for _, test := range tests {
+		got, err := parsePortMapping(test.input)
+		if test.wantErr {
+			if err == nil {
+				t.Fatalf("parsePortMapping(%q) succeeded, want error", test.input)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("parsePortMapping(%q): %v", test.input, err)
+		}
+		if got != test.want {
+			t.Fatalf("parsePortMapping(%q) = %#v, want %#v", test.input, got, test.want)
+		}
+	}
+}
+
+func TestBuildPFRulesIncludesTCPAndUDP(t *testing.T) {
+	rules := buildPFRules("172.31.89.1", []portMapping{
+		{HostPort: 80, NodePort: 30080, Protocol: "tcp"},
+		{HostPort: 53, NodePort: 30553, Protocol: "udp"},
+	})
+	want := []string{
+		"rdr pass inet proto tcp from any to any port = 80 -> 172.31.89.1 port 30080",
+		"rdr pass inet proto udp from any to any port = 53 -> 172.31.89.1 port 30553",
+	}
+	for _, line := range want {
+		if !strings.Contains(rules, line) {
+			t.Fatalf("PF rules do not contain %q:\n%s", line, rules)
+		}
+	}
+}
+
+func TestParsePFToken(t *testing.T) {
+	got, err := parsePFToken([]byte("pf enabled\nToken : 123456789\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "123456789" {
+		t.Fatalf("token = %q", got)
+	}
+	if _, err := parsePFToken([]byte("pf enabled\n")); err == nil {
+		t.Fatal("expected missing-token error")
+	}
+}
+
+func TestNetworkEnvironmentArgs(t *testing.T) {
+	config := networkConfig{
+		HostInterface: "bridge88",
+		HostIP:        "172.31.88.1",
+		Interface:     "bridge881",
+		IP:            "172.31.89.1",
+	}
+	got := networkEnvironmentArgs(config, []portMapping{
+		{HostPort: 80, NodePort: 32768, Protocol: "tcp"},
+		{HostPort: 53, NodePort: 32769, Protocol: "udp"},
+	})
+	want := []string{
+		"--env", "MACKER_INTERFACE=bridge881",
+		"--env", "MACKER_IP=172.31.89.1",
+		"--env", "MACKER_HOST_INTERFACE=bridge88",
+		"--env", "MACKER_HOST_IP=172.31.88.1",
+		"--env", "MACKER_PORT_1=32768",
+		"--env", "MACKER_PORT_2=32769",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("environment args = %#v, want %#v", got, want)
+	}
+	if got := formatNetworkConfig(&config); got != "bridge881:172.31.89.1" {
+		t.Fatalf("network = %q", got)
+	}
+	if got := formatNetworkConfig(nil); got != "" {
+		t.Fatalf("nil network = %q", got)
+	}
+}
+
+func TestCheckPublishedPortConflicts(t *testing.T) {
+	home := t.TempDir()
+	containerDir := filepath.Join(home, "containers", "existing")
+	if err := os.MkdirAll(containerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeContainerMetadata(containerDir, containerMetadata{
+		Name:     "existing",
+		Ports:    []portMapping{{HostPort: 80, NodePort: 30080, Protocol: "tcp"}},
+		PFAnchor: pfAnchorForContainer("existing"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerContainerState(home, "existing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkPublishedPortConflicts(home, "new", []portMapping{{HostPort: 80, NodePort: 30081, Protocol: "tcp"}}); err == nil {
+		t.Fatal("expected published-port conflict")
+	}
+	if err := checkPublishedPortConflicts(home, "new", []portMapping{{HostPort: 80, NodePort: 30081, Protocol: "udp"}}); err != nil {
+		t.Fatalf("different protocol should not conflict: %v", err)
 	}
 }
 
@@ -269,6 +387,133 @@ func writeTestBundleBlob(t *testing.T, layout string, data []byte) string {
 func testBundleDigest(value string) string {
 	hash := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(hash[:])
+}
+
+func TestLogsReadsCapturedOutput(t *testing.T) {
+	home := t.TempDir()
+	containerDir := filepath.Join(home, "containers", "demo")
+	if err := os.MkdirAll(containerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(containerDir, "run.log")
+	if err := os.WriteFile(logPath, []byte("stdout\nstderr\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeContainerMetadata(containerDir, containerMetadata{Name: "demo", LogPath: logPath}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MACKER_HOME", home)
+	originalStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	commandErr := commandLogs([]string{"demo"})
+	_ = writer.Close()
+	os.Stdout = originalStdout
+	output, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if commandErr != nil {
+		t.Fatal(commandErr)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(output) != "stdout\nstderr\n" {
+		t.Fatalf("logs output = %q", output)
+	}
+}
+
+func TestExpandInteractiveShortFlags(t *testing.T) {
+	got := expandInteractiveShortFlags([]string{"-it", "demo", "--", "-ti", "value"})
+	want := []string{"-i", "-t", "demo", "--", "-ti", "value"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expanded flags = %#v, want %#v", got, want)
+	}
+}
+
+func TestRemoveContainerRemovesStorageAndState(t *testing.T) {
+	home := t.TempDir()
+	containerDir := filepath.Join(home, "containers", "demo")
+	if err := os.MkdirAll(filepath.Join(containerDir, "rootfs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(containerDir, "run.log"), []byte("output\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeContainerMetadata(containerDir, containerMetadata{Name: "demo"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerContainerState(home, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeContainer(home, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(containerDir); !os.IsNotExist(err) {
+		t.Fatalf("container directory still exists: %v", err)
+	}
+	if err := withState(home, func(state *mackerState) error {
+		if _, ok := state.Containers["demo"]; ok {
+			t.Fatal("removed container remains in state")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPSRemovesExitedAutoRemoveContainer(t *testing.T) {
+	home := t.TempDir()
+	containerDir := filepath.Join(home, "containers", "auto")
+	if err := os.MkdirAll(containerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	process := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := process.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := process.Process.Pid
+	if err := process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeContainerMetadata(containerDir, containerMetadata{
+		Name:       "auto",
+		PID:        pid,
+		AutoRemove: true,
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerContainerState(home, "auto"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MACKER_HOME", home)
+	if err := commandPS([]string{"--all"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(containerDir); !os.IsNotExist(err) {
+		t.Fatalf("auto-remove container directory still exists: %v", err)
+	}
+}
+
+func TestContainerStatusPendingForegroundIsRunning(t *testing.T) {
+	status, err := containerStatus(containerMetadata{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" {
+		t.Fatalf("pending container status = %q, want running", status)
+	}
+	stoppedAt := time.Now().UTC()
+	status, err = containerStatus(containerMetadata{StoppedAt: &stoppedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "stopped" {
+		t.Fatalf("stopped container status = %q, want stopped", status)
+	}
 }
 
 func TestContainerStateRoundTrip(t *testing.T) {

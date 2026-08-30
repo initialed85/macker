@@ -1,5 +1,5 @@
-// Command macker is the first user-facing CLI for native Darwin OCI
-// workloads. It deliberately supports a small, explicit subset of Docker's
+// Command macker is a user-facing CLI for native Darwin OCI workloads. It
+// deliberately supports a small, explicit subset of Docker's
 // UX rather than pretending to provide Linux container semantics.
 package main
 
@@ -25,6 +25,31 @@ import (
 )
 
 type stringList []string
+
+func expandInteractiveShortFlags(args []string) []string {
+	expanded := make([]string, 0, len(args)+2)
+	afterSeparator := false
+	for _, arg := range args {
+		if afterSeparator {
+			expanded = append(expanded, arg)
+			continue
+		}
+		if arg == "--" {
+			expanded = append(expanded, arg)
+			afterSeparator = true
+			continue
+		}
+		switch arg {
+		case "-it":
+			expanded = append(expanded, "-i", "-t")
+		case "-ti":
+			expanded = append(expanded, "-t", "-i")
+		default:
+			expanded = append(expanded, arg)
+		}
+	}
+	return expanded
+}
 
 func (s *stringList) String() string { return strings.Join(*s, ",") }
 
@@ -70,15 +95,31 @@ type volume struct {
 	ContainerPath string
 }
 
+type portMapping struct {
+	HostPort uint16 `json:"host_port"`
+	NodePort uint16 `json:"node_port"`
+	Protocol string `json:"protocol"`
+}
+
+type pfPortState struct {
+	Anchor string
+	Token  string
+}
+
 type containerMetadata struct {
-	Name      string     `json:"name"`
-	Image     string     `json:"image"`
-	Network   string     `json:"network"`
-	Volumes   []volume   `json:"volumes,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	PID       int        `json:"pid,omitempty"`
-	LogPath   string     `json:"log_path,omitempty"`
-	StoppedAt *time.Time `json:"stopped_at,omitempty"`
+	Name          string         `json:"name"`
+	Image         string         `json:"image"`
+	Network       string         `json:"network"`
+	Volumes       []volume       `json:"volumes,omitempty"`
+	Ports         []portMapping  `json:"ports,omitempty"`
+	PFAnchor      string         `json:"pf_anchor,omitempty"`
+	PFToken       string         `json:"pf_token,omitempty"`
+	NetworkConfig *networkConfig `json:"network_config,omitempty"`
+	AutoRemove    bool           `json:"auto_remove,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	PID           int            `json:"pid,omitempty"`
+	LogPath       string         `json:"log_path,omitempty"`
+	StoppedAt     *time.Time     `json:"stopped_at,omitempty"`
 }
 
 type imageRecord struct {
@@ -102,6 +143,8 @@ func main() {
 	switch os.Args[1] {
 	case "build":
 		err = commandBuild(os.Args[2:])
+	case "oci":
+		err = commandOCI(os.Args[2:])
 	case "push":
 		err = commandPush(os.Args[2:])
 	case "pull":
@@ -110,6 +153,10 @@ func main() {
 		err = commandBundle(os.Args[2:])
 	case "run":
 		err = commandRun(os.Args[2:])
+	case "exec":
+		err = commandExec(os.Args[2:])
+	case "logs":
+		err = commandLogs(os.Args[2:])
 	case "stop":
 		err = commandStop(os.Args[2:])
 	case "ps":
@@ -139,10 +186,13 @@ func usage() {
 
 Usage:
   macker build -f Mackerfile -t IMAGE CONTEXT
+  macker oci <build|inspect|unpack|run> [flags]
   macker push IMAGE
   macker pull IMAGE
   macker bundle [--no-push] SOURCE DARWIN-IMAGE
-  macker run [-d|--detach] --net=host --name=NAME [-v HOST:CONTAINER] IMAGE [-- COMMAND ARG...]
+  macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host --name=NAME [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
+  macker exec [-i|--interactive] [-t|--tty] NAME [-- COMMAND ARG...]
+  macker logs [-f|--follow] NAME
   macker stop NAME
   macker rm [-f|--force] NAME
   macker ps [-a|--all]
@@ -233,26 +283,16 @@ func commandBuild(args []string) error {
 	if err != nil {
 		return err
 	}
-	oci, err := darwinOCIBinary()
-	if err != nil {
-		return err
-	}
-	ociArgs := []string{
-		"build",
-		"--rootfs", buildRoot,
-		"--output", layout,
-		"--tag", ref.Tag,
-		"--architecture", runtime.GOARCH,
-		"--entrypoint", entrypoint,
-		"--workdir", spec.WorkingDir,
-	}
-	for _, value := range spec.Env {
-		ociArgs = append(ociArgs, "--env="+value)
-	}
-	for _, value := range imageArgs {
-		ociArgs = append(ociArgs, "--arg="+value)
-	}
-	if err := runCommand(oci, ociArgs...); err != nil {
+	if err := buildImage(buildOptions{
+		RootFS:       buildRoot,
+		Output:       layout,
+		Tag:          ref.Tag,
+		Architecture: runtime.GOARCH,
+		Entrypoint:   entrypoint,
+		Args:         imageArgs,
+		Env:          spec.Env,
+		WorkingDir:   spec.WorkingDir,
+	}); err != nil {
 		_ = os.RemoveAll(layout)
 		return err
 	}
@@ -588,8 +628,8 @@ func loadBundleIndex(layout string) (bundleIndex, error) {
 // Skopeo's OCI transport treats a root index with multiple descriptors as an
 // ambiguous collection unless it has a tagged descriptor pointing to one
 // image. Wrap a multi-platform layout in a tagged index descriptor for
-// registry transfers, while keeping the local layout flat for darwin-oci and
-// macker run.
+// registry transfers, while keeping the local layout flat for the local OCI
+// commands and macker run.
 func bundleSourceForPush(home, layout, tag string) (string, func(), error) {
 	index, err := loadBundleIndex(layout)
 	if err != nil {
@@ -899,19 +939,32 @@ func replaceBundleLayout(target, staging string) error {
 }
 
 func commandRun(args []string) error {
+	args = expandInteractiveShortFlags(args)
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	network := fs.String("net", "", "network mode; only host is supported")
 	name := fs.String("name", "", "required container name")
 	detach := fs.Bool("d", false, "run in the background")
+	autoRemove := fs.Bool("rm", false, "remove the container after it exits")
+	interactive := fs.Bool("i", false, "keep standard input open")
+	tty := fs.Bool("t", false, "attach the caller's terminal")
 	fs.BoolVar(detach, "detach", false, "run in the background")
+	fs.BoolVar(interactive, "interactive", false, "keep standard input open")
+	fs.BoolVar(tty, "tty", false, "attach the caller's terminal")
+	entrypoint := fs.String("entrypoint", "", "override the image entrypoint")
 	var rawVolumes stringList
 	fs.Var(&rawVolumes, "v", "host path and container path, HOST:CONTAINER (repeatable)")
+	var rawPorts stringList
+	fs.Var(&rawPorts, "p", "publish HOST_PORT:NODE_PORT[/tcp|/udp] (repeatable)")
+	fs.Var(&rawPorts, "publish", "publish HOST_PORT:NODE_PORT[/tcp|/udp] (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *network != "host" {
 		return errors.New("run requires --net=host; other network modes are not implemented")
+	}
+	if *detach && (*interactive || *tty) {
+		return errors.New("interactive and tty runs cannot be detached")
 	}
 	if *name == "" {
 		return errors.New("run requires --name NAME")
@@ -938,9 +991,26 @@ func commandRun(args []string) error {
 		}
 		volumes = append(volumes, parsed)
 	}
+	ports := make([]portMapping, 0, len(rawPorts))
+	seenPorts := make(map[string]struct{}, len(rawPorts))
+	for _, raw := range rawPorts {
+		parsed, err := parsePortMapping(raw)
+		if err != nil {
+			return err
+		}
+		key := fmt.Sprintf("%d/%s", parsed.HostPort, parsed.Protocol)
+		if _, exists := seenPorts[key]; exists {
+			return fmt.Errorf("duplicate published port %q", raw)
+		}
+		seenPorts[key] = struct{}{}
+		ports = append(ports, parsed)
+	}
 
 	home, err := mackerHome()
 	if err != nil {
+		return err
+	}
+	if err := checkPublishedPortConflicts(home, *name, ports); err != nil {
 		return err
 	}
 	layout := imageLayoutPath(home, ref)
@@ -962,36 +1032,76 @@ func commandRun(args []string) error {
 		return fmt.Errorf("create container rootfs: %w", err)
 	}
 	setupComplete := false
+	var pfState pfPortState
+	pfInstalled := false
+	var networkCfg networkConfig
+	networkInstalled := false
 	defer func() {
+		if pfInstalled {
+			_ = cleanupPFPortMappings(pfState)
+		}
+		if networkInstalled {
+			_ = cleanupMackerNetwork(home, *name, networkCfg)
+		}
 		if !setupComplete {
 			_ = unregisterContainerState(home, *name)
 			_ = os.RemoveAll(containerDir)
 		}
 	}()
 
-	oci, err := darwinOCIBinary()
+	networkCfg, err = setupMackerNetwork(home)
 	if err != nil {
 		return err
 	}
-	if err := runCommand(oci, "unpack", "--force", "--output", rootfs, layout); err != nil {
+	networkInstalled = true
+
+	if err := commandOCIUnpack([]string{"--force", "--output", rootfs, layout}); err != nil {
 		return err
+	}
+	if replacedFiles, err := substituteMackerConfig(rootfs, networkEnvironmentValues(networkCfg, ports)); err != nil {
+		return fmt.Errorf("configure container rootfs: %w", err)
+	} else if replacedFiles > 0 {
+		fmt.Fprintf(os.Stderr, "substituted Macker tokens in %d config file(s)\n", replacedFiles)
 	}
 	for _, mount := range volumes {
 		if err := installVolume(rootfs, mount); err != nil {
 			return err
 		}
 	}
-	metadata := containerMetadata{
-		Name:      *name,
-		Image:     ref.Normalized,
-		Network:   *network,
-		Volumes:   volumes,
-		CreatedAt: time.Now().UTC(),
+	if len(ports) > 0 {
+		pfState, err = installPFPortMappings(*name, networkCfg.IP, ports)
+		if err != nil {
+			return err
+		}
+		pfInstalled = true
 	}
-	runArgs := []string{"run", "--skip-unpack", "--rootfs", rootfs, layout}
+	metadata := containerMetadata{
+		Name:          *name,
+		Image:         ref.Normalized,
+		Network:       *network,
+		Volumes:       volumes,
+		Ports:         ports,
+		PFAnchor:      pfState.Anchor,
+		PFToken:       pfState.Token,
+		NetworkConfig: &networkCfg,
+		AutoRemove:    *autoRemove,
+		CreatedAt:     time.Now().UTC(),
+	}
+	ociRunArgs := []string{"--skip-unpack", "--rootfs", rootfs}
+	if *interactive {
+		ociRunArgs = append(ociRunArgs, "--interactive")
+	}
+	if *tty {
+		ociRunArgs = append(ociRunArgs, "--tty")
+	}
+	ociRunArgs = append(ociRunArgs, networkEnvironmentArgs(networkCfg, ports)...)
+	if *entrypoint != "" {
+		ociRunArgs = append(ociRunArgs, "--entrypoint", *entrypoint)
+	}
+	ociRunArgs = append(ociRunArgs, layout)
 	if len(commandOverride) > 0 {
-		runArgs = append(runArgs, "--")
-		runArgs = append(runArgs, commandOverride...)
+		ociRunArgs = append(ociRunArgs, "--")
+		ociRunArgs = append(ociRunArgs, commandOverride...)
 	}
 
 	if *detach {
@@ -999,7 +1109,12 @@ func commandRun(args []string) error {
 		if err := writeContainerMetadata(containerDir, metadata); err != nil {
 			return err
 		}
-		pid, err := runDetached(oci, runArgs, metadata.LogPath)
+		executable, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve macker executable: %w", err)
+		}
+		childArgs := append([]string{"oci", "run"}, ociRunArgs...)
+		pid, err := runDetached(executable, childArgs, metadata.LogPath)
 		if err != nil {
 			return err
 		}
@@ -1013,7 +1128,9 @@ func commandRun(args []string) error {
 			return err
 		}
 		setupComplete = true
-		fmt.Printf("started container %s (pid %d), log: %s\n", *name, pid, metadata.LogPath)
+		pfInstalled = false
+		networkInstalled = false
+		fmt.Printf("started container %s (pid %d), network: %s/%s, log: %s\n", *name, pid, networkCfg.Interface, networkCfg.IP, metadata.LogPath)
 		return nil
 	}
 
@@ -1024,7 +1141,248 @@ func commandRun(args []string) error {
 		return err
 	}
 	setupComplete = true
-	return runCommand(oci, runArgs...)
+	runErr := commandOCIRun(ociRunArgs)
+	pfInstalled = false
+	networkInstalled = false
+	metadata.PID = 0
+	stoppedAt := time.Now().UTC()
+	metadata.StoppedAt = &stoppedAt
+	resourceCleanupErr := cleanupContainerResources(home, *name, &metadata)
+	metadataWriteErr := writeContainerMetadata(containerDir, metadata)
+	if metadata.AutoRemove && resourceCleanupErr == nil && metadataWriteErr == nil {
+		removeErr := removeContainer(home, *name)
+		if removeErr == nil {
+			fmt.Printf("removed container %s\n", *name)
+		}
+		return errors.Join(runErr, removeErr)
+	}
+	return errors.Join(runErr, resourceCleanupErr, metadataWriteErr)
+}
+
+func commandExec(args []string) error {
+	args = expandInteractiveShortFlags(args)
+	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	interactive := fs.Bool("i", false, "keep standard input open")
+	tty := fs.Bool("t", false, "attach the caller's terminal")
+	fs.BoolVar(interactive, "interactive", false, "keep standard input open")
+	fs.BoolVar(tty, "tty", false, "attach the caller's terminal")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return errors.New("exec requires a container name")
+	}
+	name := fs.Arg(0)
+	if !validContainerName(name) {
+		return fmt.Errorf("invalid container name %q", name)
+	}
+	command := fs.Args()[1:]
+	if len(command) > 0 && command[0] == "--" {
+		command = command[1:]
+	}
+	if len(command) == 0 {
+		command = []string{"/bin/sh"}
+	}
+
+	home, err := mackerHome()
+	if err != nil {
+		return err
+	}
+	containerDir := filepath.Join(home, "containers", name)
+	metadataBytes, err := os.ReadFile(filepath.Join(containerDir, "metadata.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("container %q was not found", name)
+		}
+		return fmt.Errorf("read container metadata: %w", err)
+	}
+	var metadata containerMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		return fmt.Errorf("decode container metadata: %w", err)
+	}
+	status, err := containerStatus(metadata)
+	if err != nil {
+		return fmt.Errorf("inspect container %q: %w", name, err)
+	}
+	if status != "running" {
+		return fmt.Errorf("container %q is not running", name)
+	}
+	rootfs := filepath.Join(containerDir, "rootfs")
+	rootfsInfo, err := os.Lstat(rootfs)
+	if err != nil {
+		return fmt.Errorf("stat container %q rootfs: %w", name, err)
+	}
+	if !rootfsInfo.IsDir() || rootfsInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("container %q rootfs is not a normal directory", name)
+	}
+	ref, err := parseImageRef(metadata.Image)
+	if err != nil {
+		return fmt.Errorf("parse container image: %w", err)
+	}
+	layout := imageLayoutPath(home, ref)
+	if err := requireLayout(layout); err != nil {
+		return fmt.Errorf("exec %s: %w", ref.Normalized, err)
+	}
+
+	execDir := filepath.Join(containerDir, "exec")
+	if err := os.MkdirAll(execDir, 0o755); err != nil {
+		return fmt.Errorf("create container exec directory: %w", err)
+	}
+	pidFile := filepath.Join(execDir, strconv.Itoa(os.Getpid())+".pid")
+	ociArgs := []string{"--skip-unpack", "--rootfs", rootfs, "--host-fallback", "--pid-file", pidFile}
+	if *interactive {
+		ociArgs = append(ociArgs, "--interactive")
+	}
+	if *tty {
+		ociArgs = append(ociArgs, "--tty")
+	}
+	if metadata.NetworkConfig != nil {
+		ociArgs = append(ociArgs, networkEnvironmentArgs(*metadata.NetworkConfig, metadata.Ports)...)
+	}
+	ociArgs = append(ociArgs, layout, "--")
+	ociArgs = append(ociArgs, command...)
+	return commandOCIRun(ociArgs)
+}
+
+func stopExecProcesses(containerDir string) error {
+	execDir := filepath.Join(containerDir, "exec")
+	entries, err := os.ReadDir(execDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read exec processes: %w", err)
+	}
+	var cleanupErrs []error
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pid") {
+			continue
+		}
+		pidFile := filepath.Join(execDir, entry.Name())
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("read exec PID file %s: %w", entry.Name(), err))
+			continue
+		}
+		fields := strings.Fields(string(data))
+		if len(fields) != 2 && len(fields) != 3 {
+			_ = os.Remove(pidFile)
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		ownerPID, ownerErr := strconv.Atoi(fields[1])
+		processGroup := true
+		if len(fields) == 3 {
+			groupValue, groupErr := strconv.Atoi(fields[2])
+			if groupErr != nil || (groupValue != 0 && groupValue != 1) {
+				_ = os.Remove(pidFile)
+				continue
+			}
+			processGroup = groupValue == 1
+		}
+		if pidErr != nil || ownerErr != nil || pid <= 0 || ownerPID <= 0 {
+			_ = os.Remove(pidFile)
+			continue
+		}
+		parentPID, parentErr := processParentPID(pid)
+		if parentErr != nil || parentPID != ownerPID {
+			_ = os.Remove(pidFile)
+			continue
+		}
+		alive, err := processAlive(pid)
+		if err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("check exec process %d: %w", pid, err))
+			continue
+		}
+		if alive {
+			target := pid
+			if processGroup {
+				target = -target
+			}
+			if err := syscall.Kill(target, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("signal exec process %d: %w", pid, err))
+				continue
+			}
+			if err := waitForProcessExit(pid, 10*time.Second); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("stop exec process %d: %w", pid, err))
+				continue
+			}
+		}
+		if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove exec PID file %s: %w", entry.Name(), err))
+		}
+	}
+	return errors.Join(cleanupErrs...)
+}
+
+func processParentPID(pid int) (int, error) {
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "ppid=").Output()
+	if err != nil {
+		return 0, err
+	}
+	parentPID, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return 0, fmt.Errorf("parse parent PID: %w", err)
+	}
+	return parentPID, nil
+}
+
+func commandLogs(args []string) error {
+	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	follow := fs.Bool("f", false, "follow log output")
+	fs.BoolVar(follow, "follow", false, "follow log output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("logs requires exactly one container name")
+	}
+	name := fs.Arg(0)
+	if !validContainerName(name) {
+		return fmt.Errorf("invalid container name %q", name)
+	}
+	home, err := mackerHome()
+	if err != nil {
+		return err
+	}
+	containerDir := filepath.Join(home, "containers", name)
+	metadataBytes, err := os.ReadFile(filepath.Join(containerDir, "metadata.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("container %q was not found", name)
+		}
+		return fmt.Errorf("read container metadata: %w", err)
+	}
+	var metadata containerMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		return fmt.Errorf("decode container metadata: %w", err)
+	}
+	if metadata.LogPath == "" {
+		return fmt.Errorf("container %q has no captured log; only detached runs capture logs", name)
+	}
+	logFile, err := os.Open(metadata.LogPath)
+	if err != nil {
+		return fmt.Errorf("open container %q log: %w", name, err)
+	}
+	defer logFile.Close()
+	for {
+		if _, err := io.Copy(os.Stdout, logFile); err != nil {
+			return fmt.Errorf("read container %q log: %w", name, err)
+		}
+		if !*follow || metadata.PID <= 0 {
+			return nil
+		}
+		alive, err := processAlive(metadata.PID)
+		if err != nil {
+			return fmt.Errorf("check container %q process: %w", name, err)
+		}
+		if !alive {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func commandStop(args []string) error {
@@ -1052,7 +1410,30 @@ func commandStop(args []string) error {
 	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
 		return fmt.Errorf("decode container metadata: %w", err)
 	}
+	if err := stopExecProcesses(containerDir); err != nil {
+		return err
+	}
 	if metadata.PID <= 0 {
+		if metadata.StoppedAt == nil {
+			return fmt.Errorf("container %q has no stoppable process yet", name)
+		}
+		resourceCleanupErr := cleanupContainerResources(home, name, &metadata)
+		if resourceCleanupErr != nil {
+			return resourceCleanupErr
+		}
+		if err := writeContainerMetadata(containerDir, metadata); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if metadata.AutoRemove {
+			if err := removeContainer(home, name); err != nil {
+				return err
+			}
+			fmt.Printf("removed container %s\n", name)
+			return nil
+		}
 		return fmt.Errorf("container %q is not a detached workload", name)
 	}
 
@@ -1068,14 +1449,41 @@ func commandStop(args []string) error {
 			return fmt.Errorf("stop container %q: %w", name, err)
 		}
 	}
+	if err := cleanupContainerResources(home, name, &metadata); err != nil {
+		return err
+	}
 
 	metadata.PID = 0
 	stoppedAt := time.Now().UTC()
 	metadata.StoppedAt = &stoppedAt
 	if err := writeContainerMetadata(containerDir, metadata); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
 	fmt.Printf("stopped container %s\n", name)
+	if metadata.AutoRemove {
+		if err := removeContainer(home, name); err != nil {
+			return err
+		}
+		fmt.Printf("removed container %s\n", name)
+	}
+	return nil
+}
+
+func removeContainer(home, name string) error {
+	return withState(home, func(state *mackerState) error {
+		return removeContainerFromState(state, home, name)
+	})
+}
+
+func removeContainerFromState(state *mackerState, home, name string) error {
+	containerDir := filepath.Join(home, "containers", name)
+	if err := os.RemoveAll(containerDir); err != nil {
+		return fmt.Errorf("remove container %q: %w", name, err)
+	}
+	delete(state.Containers, name)
 	return nil
 }
 
@@ -1122,15 +1530,19 @@ func commandRM(args []string) error {
 		if err := commandStop([]string{name}); err != nil {
 			return err
 		}
+		if metadata.AutoRemove {
+			return nil
+		}
+	} else {
+		if err := stopExecProcesses(containerDir); err != nil {
+			return err
+		}
+		if err := cleanupContainerResources(home, name, &metadata); err != nil {
+			return err
+		}
 	}
 
-	if err := withState(home, func(state *mackerState) error {
-		if err := os.RemoveAll(containerDir); err != nil {
-			return fmt.Errorf("remove container %q: %w", name, err)
-		}
-		delete(state.Containers, name)
-		return nil
-	}); err != nil {
+	if err := removeContainer(home, name); err != nil {
 		return err
 	}
 	fmt.Printf("removed container %s\n", name)
@@ -1178,6 +1590,29 @@ func commandPS(args []string) error {
 			if err != nil {
 				return fmt.Errorf("inspect container %q: %w", name, err)
 			}
+			if status != "running" {
+				if err := stopExecProcesses(filepath.Join(home, "containers", name)); err != nil {
+					return err
+				}
+			}
+			if status != "running" && (metadata.PFAnchor != "" || metadata.PFToken != "" || metadata.NetworkConfig != nil) {
+				if err := cleanupContainerResources(home, name, &metadata); err != nil {
+					return err
+				}
+				if err := writeContainerMetadata(filepath.Join(home, "containers", name), metadata); err != nil {
+					if errors.Is(err, os.ErrNotExist) {
+						delete(state.Containers, name)
+						continue
+					}
+					return err
+				}
+			}
+			if metadata.AutoRemove && status != "running" {
+				if err := removeContainerFromState(state, home, name); err != nil {
+					return err
+				}
+				continue
+			}
 			if !*all && status != "running" {
 				continue
 			}
@@ -1189,7 +1624,9 @@ func commandPS(args []string) error {
 				Name:    name,
 				Image:   metadata.Image,
 				Status:  status,
+				Network: formatNetworkConfig(metadata.NetworkConfig),
 				PID:     pid,
+				Ports:   formatPortMappings(metadata.Ports),
 				Created: metadata.CreatedAt.Format(time.RFC3339),
 			})
 		}
@@ -1198,9 +1635,9 @@ func commandPS(args []string) error {
 		return err
 	}
 
-	fmt.Println("NAME\tIMAGE\tSTATUS\tPID\tCREATED")
+	fmt.Println("NAME\tIMAGE\tSTATUS\tNETWORK\tPID\tPORTS\tCREATED")
 	for _, row := range rows {
-		fmt.Printf("%s\t%s\t%s\t%s\t%s\n", row.Name, row.Image, row.Status, row.PID, row.Created)
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n", row.Name, row.Image, row.Status, row.Network, row.PID, row.Ports, row.Created)
 	}
 	return nil
 }
@@ -1209,11 +1646,13 @@ type psRow struct {
 	Name    string
 	Image   string
 	Status  string
+	Network string
 	PID     string
+	Ports   string
 	Created string
 }
 
-type imageIndex struct {
+type storedImageIndex struct {
 	Manifests []imageDescriptor `json:"manifests"`
 }
 
@@ -1338,7 +1777,7 @@ func containerStatus(metadata containerMetadata) (string, error) {
 	if metadata.StoppedAt != nil {
 		return "stopped", nil
 	}
-	return "exited", nil
+	return "running", nil
 }
 
 func commandForSpec(spec buildSpec) (string, []string, error) {
@@ -1600,7 +2039,7 @@ func imageReferenceFromLayout(layout string) string {
 	if err != nil {
 		return ""
 	}
-	var index imageIndex
+	var index storedImageIndex
 	if err := json.Unmarshal(data, &index); err != nil {
 		return ""
 	}
@@ -1653,22 +2092,6 @@ func requireLayout(layout string) error {
 		return fmt.Errorf("image layout marker is a directory")
 	}
 	return nil
-}
-
-func darwinOCIBinary() (string, error) {
-	if configured := os.Getenv("MACKER_DARWIN_OCI"); configured != "" {
-		return configured, nil
-	}
-	if executable, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(executable), "darwin-oci")
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-	if candidate, err := exec.LookPath("darwin-oci"); err == nil {
-		return candidate, nil
-	}
-	return "", errors.New("darwin-oci was not found; build it beside macker or set MACKER_DARWIN_OCI")
 }
 
 func skopeoBinary() (string, error) {
@@ -1829,6 +2252,215 @@ func parseVolume(raw string) (volume, error) {
 	return volume{HostPath: host, ContainerPath: container}, nil
 }
 
+func checkPublishedPortConflicts(home, name string, ports []portMapping) error {
+	if len(ports) == 0 {
+		return nil
+	}
+	requested := make(map[string]struct{}, len(ports))
+	for _, port := range ports {
+		requested[fmt.Sprintf("%d/%s", port.HostPort, port.Protocol)] = struct{}{}
+	}
+	return withState(home, func(state *mackerState) error {
+		for otherName := range state.Containers {
+			if otherName == name {
+				continue
+			}
+			metadataPath := filepath.Join(home, "containers", otherName, "metadata.json")
+			data, err := os.ReadFile(metadataPath)
+			if err != nil {
+				return fmt.Errorf("read container %q metadata: %w", otherName, err)
+			}
+			var metadata containerMetadata
+			if err := json.Unmarshal(data, &metadata); err != nil {
+				return fmt.Errorf("decode container %q metadata: %w", otherName, err)
+			}
+			if metadata.PFAnchor == "" {
+				continue
+			}
+			for _, port := range metadata.Ports {
+				key := fmt.Sprintf("%d/%s", port.HostPort, port.Protocol)
+				if _, exists := requested[key]; exists {
+					return fmt.Errorf("published port %d/%s is already used by container %q", port.HostPort, port.Protocol, otherName)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func parsePortMapping(raw string) (portMapping, error) {
+	value := strings.TrimSpace(raw)
+	protocol := "tcp"
+	if strings.Count(value, "/") > 1 {
+		return portMapping{}, fmt.Errorf("invalid port mapping %q; expected HOST_PORT:NODE_PORT[/tcp|/udp]", raw)
+	}
+	if slash := strings.LastIndexByte(value, '/'); slash >= 0 {
+		protocol = strings.ToLower(value[slash+1:])
+		value = value[:slash]
+		if protocol != "tcp" && protocol != "udp" {
+			return portMapping{}, fmt.Errorf("invalid port mapping protocol %q; use tcp or udp", protocol)
+		}
+	}
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 {
+		return portMapping{}, fmt.Errorf("invalid port mapping %q; expected HOST_PORT:NODE_PORT[/tcp|/udp]", raw)
+	}
+	hostPort, err := parsePortNumber(parts[0])
+	if err != nil {
+		return portMapping{}, fmt.Errorf("invalid host port in %q: %w", raw, err)
+	}
+	nodePort, err := parsePortNumber(parts[1])
+	if err != nil {
+		return portMapping{}, fmt.Errorf("invalid node port in %q: %w", raw, err)
+	}
+	return portMapping{HostPort: hostPort, NodePort: nodePort, Protocol: protocol}, nil
+}
+
+func parsePortNumber(value string) (uint16, error) {
+	if value == "" {
+		return 0, errors.New("port must be between 1 and 65535")
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0, errors.New("port must be a decimal number between 1 and 65535")
+		}
+	}
+	number, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || number == 0 {
+		return 0, errors.New("port must be between 1 and 65535")
+	}
+	return uint16(number), nil
+}
+
+func formatPortMappings(ports []portMapping) string {
+	formatted := make([]string, 0, len(ports))
+	for _, port := range ports {
+		formatted = append(formatted, fmt.Sprintf("%d:%d/%s", port.HostPort, port.NodePort, port.Protocol))
+	}
+	return strings.Join(formatted, ",")
+}
+
+// macOS's default /etc/pf.conf exposes com.apple/* as a dynamic rdr anchor.
+// Keep one child anchor per container so Macker can replace and flush mappings
+// without touching the main PF ruleset.
+const pfAnchorPrefix = "com.apple/macker-"
+
+func pfAnchorForContainer(name string) string {
+	return pfAnchorPrefix + name
+}
+
+func installPFPortMappings(name, targetIP string, ports []portMapping) (state pfPortState, err error) {
+	if runtime.GOOS != "darwin" {
+		return state, errors.New("port publishing requires a Darwin host with pfctl")
+	}
+	if err := ensurePFAnchorAvailable(); err != nil {
+		return state, err
+	}
+	anchor := pfAnchorForContainer(name)
+	tokenOutput, err := runPFCTL("-E")
+	if err != nil {
+		return state, fmt.Errorf("enable PF: %w; port publishing requires root or passwordless sudo", err)
+	}
+	token, err := parsePFToken(tokenOutput)
+	if err != nil {
+		return state, fmt.Errorf("read PF enable token: %w", err)
+	}
+	state = pfPortState{Anchor: anchor, Token: token}
+	cleanupNeeded := true
+	defer func() {
+		if cleanupNeeded {
+			_ = cleanupPFPortMappings(state)
+		}
+	}()
+
+	rulesFile, err := os.CreateTemp("", "macker-pf-*.conf")
+	if err != nil {
+		return state, fmt.Errorf("create PF rules: %w", err)
+	}
+	rulesPath := rulesFile.Name()
+	defer os.Remove(rulesPath)
+	if _, err := rulesFile.WriteString(buildPFRules(targetIP, ports)); err != nil {
+		_ = rulesFile.Close()
+		return state, fmt.Errorf("write PF rules: %w", err)
+	}
+	if err := rulesFile.Close(); err != nil {
+		return state, fmt.Errorf("close PF rules: %w", err)
+	}
+	if _, err := runPFCTL("-a", anchor, "-f", rulesPath); err != nil {
+		return state, fmt.Errorf("load PF rules: %w", err)
+	}
+	cleanupNeeded = false
+	return state, nil
+}
+
+func ensurePFAnchorAvailable() error {
+	output, err := runPFCTL("-a", "*", "-sn")
+	if err != nil {
+		return fmt.Errorf("inspect PF anchors: %w", err)
+	}
+	if !strings.Contains(string(output), `rdr-anchor "com.apple/*"`) {
+		return errors.New(`PF does not expose macOS's com.apple/* rdr anchor; add rdr-anchor "com.apple/*" to the active PF configuration`)
+	}
+	return nil
+}
+
+func cleanupPFPortMappings(state pfPortState) error {
+	var cleanupErrors []error
+	if state.Anchor != "" {
+		if _, err := runPFCTL("-a", state.Anchor, "-F", "nat"); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("flush PF anchor %s: %w", state.Anchor, err))
+		}
+	}
+	if state.Token != "" {
+		if _, err := runPFCTL("-X", state.Token); err != nil && !isStalePFTokenError(err) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("release PF enable token: %w", err))
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func isStalePFTokenError(err error) bool {
+	return strings.Contains(err.Error(), "pf: token invalid")
+}
+
+func buildPFRules(targetIP string, ports []portMapping) string {
+	var rules strings.Builder
+	for _, port := range ports {
+		// Omitting an interface makes PF evaluate the redirect on all
+		// interfaces, including interfaces that Macker does not know about yet.
+		fmt.Fprintf(&rules, "rdr pass inet proto %s from any to any port = %d -> %s port %d\n", port.Protocol, port.HostPort, targetIP, port.NodePort)
+	}
+	return rules.String()
+}
+
+func parsePFToken(output []byte) (string, error) {
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "Token" {
+			token := fields[len(fields)-1]
+			if _, err := strconv.ParseUint(token, 10, 64); err == nil {
+				return token, nil
+			}
+		}
+	}
+	return "", errors.New("pfctl did not return an enable token")
+}
+
+func runPFCTL(args ...string) ([]byte, error) {
+	pfctlBinary := os.Getenv("MACKER_PFCTL")
+	if pfctlBinary == "" {
+		var err error
+		pfctlBinary, err = exec.LookPath("pfctl")
+		if err != nil {
+			if _, statErr := os.Stat("/sbin/pfctl"); statErr != nil {
+				return nil, errors.New("pfctl was not found")
+			}
+			pfctlBinary = "/sbin/pfctl"
+		}
+	}
+	return runPrivileged(pfctlBinary, args...)
+}
+
 func validContainerName(name string) bool {
 	if name == "" || len(name) > 128 {
 		return false
@@ -1961,7 +2593,7 @@ func parseMackerfile(filename string) (buildSpec, error) {
 			if !fromSeen || strings.TrimSpace(rest) == "" {
 				return buildSpec{}, fmt.Errorf("Mackerfile line %d: invalid EXPOSE", logical.Number)
 			}
-			// EXPOSE is metadata only and the current runtime has no port map.
+			// EXPOSE remains metadata only; runtime publishing is explicit with -p.
 		case "":
 			continue
 		default:

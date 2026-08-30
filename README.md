@@ -8,25 +8,25 @@ Macker is **not** a Linux container runtime. It provides no process,
 filesystem, network, or resource isolation. Treat images and `RUN` commands as
 trusted host workloads.
 
-## But... Why?
+## Why?
 
-I run K3s at home, and I also do an amount of local AI stuff on my Mac- I'm ultimately trying
-to work towards blending those two worlds in some kind of unholy union, allowing me to build
-and distribute OCI images with code compiled for Darwin inside then, then join my Mac to my 
-K3s cluster, scheduling AI workloads on it as transparently as if it was one of my Linux nodes.
+I run K3s at home and use my Mac for local AI work. Macker is an experiment
+toward blending those worlds: building and distributing OCI images containing
+Darwin binaries, then scheduling AI workloads on the Mac as transparently as
+possible alongside Linux nodes in the K3s cluster.
 
 ## Requirements
 
 - Apple Silicon macOS for building and running Darwin workloads
 - Go 1.22+
+- `ifconfig` and `pfctl` (included with macOS) plus root or passwordless `sudo` for Darwin network setup
 - [Skopeo](https://github.com/containers/skopeo) for registry operations
 - Homebrew and its `nginx`, `pcre2`, `openssl@3`, and `ca-certificates` packages
   for the nginx example
 - Docker and Python 3 only for the full distribution test
 
-The Go tools use the standard library. Docker is not required for local OCI
-builds or native runs. `macker` finds `darwin-oci` beside itself, in `PATH`, or
-at `MACKER_DARWIN_OCI`.
+The Go tool uses the standard library. Docker is not required for local OCI
+builds or native runs.
 
 ## Quick start
 
@@ -62,9 +62,10 @@ EXPOSE 8080
 ```
 
 Supported instructions are `FROM scratch`, `RUN`, `COPY`, `ENV`, `WORKDIR`,
-JSON-array `ENTRYPOINT`/`CMD`, and `EXPOSE`. `EXPOSE` is accepted but does not
-publish or map a port. The selected entrypoint or command must be an absolute
-path.
+JSON-array `ENTRYPOINT`/`CMD`, and `EXPOSE`. `EXPOSE` is metadata only; runtime
+port publishing is explicit with `run -p`. Mackerfile entrypoints and commands
+must be absolute paths; runtime `run --entrypoint COMMAND` may instead select a
+command by the image's `PATH`.
 
 `RUN` executes `/bin/bash -c` on the host with the build context as its working
 directory. It receives `MACKER_CONTEXT`, `MACKER_ROOTFS`, the host environment,
@@ -76,6 +77,25 @@ layer.
 `COPY` sources are relative to the build context and cannot escape it;
 destinations must be absolute image paths. Non-`scratch` bases, shell-form
 commands, build arguments, and other Docker build features are not implemented.
+
+## Runtime configuration substitution
+
+When Macker materializes a rootfs for `run` or `oci run`, it replaces explicit
+runtime tokens in regular UTF-8 text/configuration files. Supported extensions
+include `.conf`, `.env`, `.ini`, `.json`, `.properties`, `.sh`, `.toml`, `.txt`,
+`.xml`, `.yaml`, and `.yml`. For example:
+
+```text
+listen ____MACKER_PORT_1____;
+```
+
+becomes `listen 8080;` when `MACKER_PORT_1=8080` is present. Tokens use the
+form `____MACKER_NAME____`; the available `MACKER_*` values come from the final
+workload environment. An unset Macker token fails startup rather than leaving
+an invalid configuration behind. Macker skips symlinks, binary-looking files,
+and unlisted extensions, and only changes the per-container rootfs—not the
+stored image or host-backed volume targets. Direct `oci run` callers can supply
+values with repeated `--env` flags.
 
 ## Registry and multi-platform images
 
@@ -112,29 +132,91 @@ application behaviour across platforms.
 ## Running workloads
 
 `run` requires explicit host networking and a name. Foreground runs inherit the
-terminal; detached runs write to `~/.macker/containers/<name>/run.log` (or the
-corresponding `MACKER_HOME` path):
+terminal for output; use `-i` to attach standard input and `-t` to attach the
+caller's terminal (`-it` is the usual interactive shell form). TTY runs preserve
+an image or explicit `TERM`; otherwise they pass through the caller's `TERM` or
+use the safe `xterm-256color` default. Interactive runs must stay in the foreground. Detached runs write to
+`~/.macker/containers/<name>/run.log` (or the corresponding `MACKER_HOME` path).
+Add `--rm` to remove the container rootfs, metadata, and state entry after a
+foreground exit or when `stop`/`ps` observes
+the workload exit. Network setup requires root or passwordless
+`sudo` because Macker creates host bridge interfaces.
+
+Each high-level `run` creates or reuses the host-side `bridge88` with
+`172.31.88.1/24`, then allocates a per-container bridge beginning at `bridge881`
+with `172.31.89.1/24`, `172.31.90.1/24`, and so on. This stays within the
+RFC1918 private `172.16.0.0/12` range while avoiding the commonly used `10.0.0.0/8`
+space. These are initial host-side networking primitives, not network
+namespaces: the workload remains an ordinary host process and the bridges have
+no members or VXLAN plumbing yet.
+
+Macker supplies the workload with `MACKER_INTERFACE`, `MACKER_IP`,
+`MACKER_HOST_INTERFACE`, and `MACKER_HOST_IP` (for example, `bridge881` and
+`172.31.89.1`). For each published mapping it
+also supplies `MACKER_PORT_1`, `MACKER_PORT_2`, and so on, containing the
+workload-side port. The workload is expected—but cannot be forced—to bind only
+to its supplied IP and ports.
+
+Use `--entrypoint COMMAND` to replace the image entrypoint while debugging or
+running a different process. Arguments after the image replace the image CMD;
+for example, `run --entrypoint bash IMAGE -c 'env'` runs `bash -c 'env'`.
+Non-chroot execution prefers the image rootfs, but an explicitly overridden
+entrypoint may fall back to a matching host executable for debugging; Macker
+prints a warning when it does so. Chroot execution does not use that fallback.
+Use Docker-style
+`-p HOST_PORT:NODE_PORT[/tcp|/udp]` to publish a port through macOS PF.
+`NODE_PORT` is the port the workload actually listens on; the default protocol
+is TCP. Publishing uses the workload bridge IP as the PF destination
+and rules without an interface restriction, so it currently covers ingress on
+any interface. Macker uses macOS's existing dynamic PF anchor and does not
+replace the main ruleset. Repeat `-p` for additional mappings, such as
+`-p 53:30553/udp`. This initial implementation is IPv4-only and does not add
+special VXLAN or bridge-member handling. PF redirects ingress traffic; a
+connection from the Mac to its own published address may require testing from
+another host.
 
 ```sh
 mkdir -p /tmp/macker-www
 printf 'hello from a Macker volume\n' > /tmp/macker-www/index.html
 ./bin/macker run \
   --detach \
+  --rm \
   --net=host \
   --name=nginx \
+  -p 80:8080/tcp \
   -v /tmp/macker-www:/usr/share/nginx/html \
   initialed85/nginx-darwin:latest
 
 ./bin/macker ps
 ./bin/macker stop nginx
-./bin/macker rm nginx
 ```
+
+For an interactive debug shell, use an image containing a shell or let Macker
+fall back to the host shell in non-chroot mode:
+
+```sh
+./bin/macker run --rm -it --net=host --name=debug \
+  --entrypoint bash initialed85/nginx-darwin:latest -- -i
+
+# Against an already-running detached container:
+./bin/macker exec -it NAME -- /bin/sh
+./bin/macker logs --follow NAME
+```
+
+`exec` requires a running detached container, starts an additional process
+with the image environment, working directory, network values, and materialized
+rootfs, and defaults to `/bin/sh`. It does not inherit environment or directory
+changes made by the entrypoint. `logs` reads the captured stdout/stderr of a
+detached run; foreground runs do not create a log file. `-t` uses the caller's
+terminal rather than providing process or filesystem isolation.
 
 Use `macker rm --force NAME` to stop and remove a running container. `macker
 images` lists local images and `macker rmi IMAGE` removes an image layout;
 removing an image does not remove existing container rootfs directories.
 Volumes are live symlinks to host paths, not kernel mounts. Host networking is
-shared, so wildcard listeners can collide on ports.
+shared, so wildcard listeners can collide on ports. `stop`, `rm`, foreground
+exit, and `ps` cleanup remove PF mappings; a detached workload that is killed
+externally is cleaned up the next time it is observed by Macker.
 
 ## Examples and tests
 
@@ -150,23 +232,25 @@ rootfs, relocate application dylibs, and ad-hoc sign the copied Mach-O files:
 ```
 
 The nginx Macker image listens on port `8080`, serves a directory listing, and
-uses `/usr/share/nginx/html` as its volume-backed document root.
+uses `/usr/share/nginx/html` as its volume-backed document root. It is built
+from `scratch` and does not include `bash`; a shell entrypoint therefore
+requires an image that contains a shell (or a suitable host volume).
 
-For the direct OCI hello experiment, which uses the legacy local layout tool:
+For the direct OCI hello experiment, use the `macker oci` subcommands:
 
 ```sh
 make image
-./bin/darwin-oci inspect --tag hello-darwin:latest ./example/image
-./bin/darwin-oci unpack --output /tmp/hello-rootfs ./example/image
-./bin/darwin-oci run --arg from --arg OCI ./example/image
+./bin/macker oci inspect --tag hello-darwin:latest ./example/image
+./bin/macker oci unpack --output /tmp/hello-rootfs ./example/image
+./bin/macker oci run --arg from --arg OCI ./example/image
 ```
 
-`darwin-oci` accepts local OCI layout directories rather than Docker daemon
-images. Its default execution mode is non-chroot. The experimental
+These commands accept local OCI layout directories rather than Docker daemon
+images. The default execution mode is non-chroot. The experimental
 `--chroot` mode requires root and changes only the filesystem root; it is not a
 security boundary and may not work for scratch images because macOS system
 libraries and dyld are host-provided. `make nginx-run` builds the nginx image
-with the legacy shell builder and runs it in the foreground.
+with Macker and runs it in the foreground.
 
 Run the Go checks with:
 
@@ -176,7 +260,9 @@ make test
 
 The full `test.sh` workflow builds Linux amd64 and arm64 images with Docker,
 combines them with Darwin images, verifies the resulting multi-platform images,
-and runs the native workloads. It pushes intermediate images and publishes
+checks `--entrypoint`, interactive `exec`, `logs`, `--rm`, and injected network
+environment, then runs the native workloads. It pushes intermediate images and
+publishes
 `initialed85/nginx:latest` by default, so use suitable credentials and ensure
 TCP port 8080 is available:
 
@@ -198,17 +284,21 @@ and `READY_TIMEOUT`.
 ## CI and releases
 
 `.github/workflows/release.yml` runs tests, vet, shell syntax checks, and a
-Darwin/arm64 cross-build for both binaries. It uploads a tarball and SHA-256
-checksum, and creates a GitHub release for pushes to `master` and manual runs.
+Darwin/arm64 cross-build of the `macker` binary. It uploads a tarball and
+SHA-256 checksum, and creates a GitHub release for pushes to `master` and
+manual runs.
 Pull requests run the checks and build but do not create releases.
 
 ## Deliberate limitations
 
 - Native workloads are ordinary macOS processes with host-visible resources.
 - There are no Linux namespaces, cgroups, capabilities, seccomp, overlayfs, or
-  per-workload network interfaces.
+  per-process network isolation. The initial bridge interfaces are host-wide
+  plumbing only.
 - CPU, memory, and process limits are not enforced.
 - Volumes are symlinks rather than isolated mounts.
+- PF publishing is IPv4-only and is global host configuration rather than
+  container isolation.
 - Only `sha256` OCI blobs and one uncompressed image layer are supported by the
   local builder.
 - File ownership, xattrs, devices, FIFOs, and extended ACLs are not fully

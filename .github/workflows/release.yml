@@ -34,16 +34,15 @@ jobs:
           sh -n test.sh
           sh -n example/nginx/build-rootfs.sh
 
-      - name: Build Darwin arm64 binaries
+      - name: Build Darwin arm64 binary
         env:
           GOOS: darwin
           GOARCH: arm64
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist/macker-darwin-arm64
-          go build -o dist/macker-darwin-arm64/darwin-oci ./cmd/darwin-oci
           go build -o dist/macker-darwin-arm64/macker ./cmd/macker
-          file dist/macker-darwin-arm64/darwin-oci dist/macker-darwin-arm64/macker
+          file dist/macker-darwin-arm64/macker
 
       - name: Package binaries
         run: |

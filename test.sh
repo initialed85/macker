@@ -31,8 +31,12 @@ SKIP_DISTRIBUTION=${SKIP_DISTRIBUTION:-$SKIP_PUSH}
 
 WEBROOT=$(mktemp -d "${TMPDIR:-/tmp}/macker-test.XXXXXX")
 RESPONSE=$(mktemp "${TMPDIR:-/tmp}/macker-response.XXXXXX")
+ENTRYPOINT_ENV=$(mktemp "${TMPDIR:-/tmp}/macker-entrypoint-env.XXXXXX")
+EXEC_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/macker-exec-output.XXXXXX")
+EXEC_STDIN_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/macker-exec-stdin-output.XXXXXX")
 STARTED=0
 SIMPLE_STARTED=0
+ENTRYPOINT_STARTED=0
 DOCKER_CLEANUP=0
 MACKER_HOME_DIR=${MACKER_HOME:-$HOME/.macker}
 case "$MACKER_HOME_DIR" in
@@ -46,6 +50,9 @@ cleanup() {
     status=$?
     if [ "$SIMPLE_STARTED" -eq 1 ]; then
         "$MACKER" rm --force "$SIMPLE_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    if [ "$ENTRYPOINT_STARTED" -eq 1 ]; then
+        "$MACKER" rm --force "$ENTRYPOINT_CONTAINER" >/dev/null 2>&1 || true
     fi
     if [ "$STARTED" -eq 1 ]; then
         "$MACKER" stop "$CONTAINER" >/dev/null 2>&1 || true
@@ -62,7 +69,7 @@ cleanup() {
             "$NGINX_AMD64_IMAGE" "$NGINX_ARM64_IMAGE" \
             >/dev/null 2>&1 || true
     fi
-    rm -rf "$WEBROOT" "$RESPONSE" example/nginx-rootfs
+    rm -rf "$WEBROOT" "$RESPONSE" "$ENTRYPOINT_ENV" "$EXEC_OUTPUT" "$EXEC_STDIN_OUTPUT" example/nginx-rootfs
     exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -242,17 +249,54 @@ SIMPLE_STARTED=1
 "$MACKER" rm "$SIMPLE_CONTAINER"
 SIMPLE_STARTED=0
 
+ENTRYPOINT_CONTAINER=${ENTRYPOINT_CONTAINER:-macker-test-entrypoint}
+DEBUG_HOST_PORT=${DEBUG_HOST_PORT:-8081}
+echo '==> testing entrypoint override and injected network environment'
+ENTRYPOINT_STARTED=1
+"$MACKER" run \
+    --rm \
+    --net=host \
+    --name "$ENTRYPOINT_CONTAINER" \
+    -p "$DEBUG_HOST_PORT:$NGINX_PORT" \
+    --entrypoint bash \
+    "$NGINX_IMAGE" \
+    -c 'env' > "$ENTRYPOINT_ENV"
+grep -Eq '^MACKER_INTERFACE=bridge88[0-9]+$' "$ENTRYPOINT_ENV"
+grep -q '^MACKER_IP=172\.31\.' "$ENTRYPOINT_ENV"
+grep -q '^MACKER_HOST_INTERFACE=bridge88$' "$ENTRYPOINT_ENV"
+grep -q '^MACKER_HOST_IP=172\.31\.88\.1$' "$ENTRYPOINT_ENV"
+grep -q "^MACKER_PORT_1=$NGINX_PORT$" "$ENTRYPOINT_ENV"
+if grep -q '^MACKER_PORT=' "$ENTRYPOINT_ENV"; then
+    echo 'legacy MACKER_PORT unexpectedly present' >&2
+    exit 1
+fi
+if [ -e "$MACKER_HOME_DIR/containers/$ENTRYPOINT_CONTAINER" ]; then
+    echo "--rm did not remove $ENTRYPOINT_CONTAINER" >&2
+    exit 1
+fi
+ENTRYPOINT_STARTED=0
+
 echo "==> starting bundled Darwin nginx container $CONTAINER detached"
 "$MACKER" run \
     -d \
+    --rm \
     --net=host \
     --name "$CONTAINER" \
+    -p "$PORT:$NGINX_PORT" \
     -v "$WEBROOT:/usr/share/nginx/html" \
     "$NGINX_IMAGE"
 STARTED=1
 
 echo '==> listing running containers'
 "$MACKER" ps
+
+echo '==> executing a command in the running container'
+"$MACKER" exec -it "$CONTAINER" -- /bin/sh -c 'printf macker-exec-ok\\n' > "$EXEC_OUTPUT" 2>/dev/null
+grep -q 'macker-exec-ok' "$EXEC_OUTPUT"
+printf 'macker-stdin-ok\\n' | "$MACKER" exec -it "$CONTAINER" -- /bin/sh -c 'read line; printf stdin=%s\\n "$line"' > "$EXEC_STDIN_OUTPUT" 2>/dev/null
+grep -q 'stdin=macker-stdin-ok' "$EXEC_STDIN_OUTPUT"
+
+"$MACKER" logs "$CONTAINER" >/dev/null
 
 log_path=$CONTAINER_DIR/run.log
 response_ok=0
@@ -280,8 +324,11 @@ echo '==> HTTP check passed'
 cat "$RESPONSE"
 echo "==> stopping $CONTAINER"
 "$MACKER" stop "$CONTAINER"
+if [ -e "$CONTAINER_DIR" ]; then
+    echo "--rm did not remove $CONTAINER_DIR" >&2
+    exit 1
+fi
 STARTED=0
-"$MACKER" rm "$CONTAINER"
 if [ "$SKIP_DISTRIBUTION" -eq 0 ]; then
     echo "Macker multi-arch bundle smoke test passed; Darwin nginx is at $NGINX_IMAGE"
 else

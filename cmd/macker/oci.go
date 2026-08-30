@@ -1,8 +1,5 @@
-// Command darwin-oci contains the first OCI experiment for k8s-darwin.
-//
-// It deliberately uses only the Go standard library. The goal is to make the
-// OCI details visible: an image is an OCI layout on disk, containing a
-// Darwin-specific config, a manifest, and an uncompressed tar layer.
+// This file implements Macker's local OCI image and workload operations.
+// It deliberately uses only the Go standard library.
 package main
 
 import (
@@ -101,15 +98,6 @@ type loadedImage struct {
 	Config    imageConfig
 }
 
-type stringList []string
-
-func (s *stringList) String() string { return strings.Join(*s, ",") }
-
-func (s *stringList) Set(value string) error {
-	*s = append(*s, value)
-	return nil
-}
-
 type buildOptions struct {
 	RootFS       string
 	Output       string
@@ -121,48 +109,35 @@ type buildOptions struct {
 	WorkingDir   string
 }
 
-func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+func commandOCI(args []string) error {
+	if len(args) == 0 {
+		return errors.New("oci requires a command: build, inspect, unpack, or run")
 	}
-
-	var err error
-	switch os.Args[1] {
+	switch args[0] {
 	case "build":
-		err = commandBuild(os.Args[2:])
+		return commandOCIBuild(args[1:])
 	case "inspect":
-		err = commandInspect(os.Args[2:])
+		return commandOCIInspect(args[1:])
 	case "unpack":
-		err = commandUnpack(os.Args[2:])
+		return commandOCIUnpack(args[1:])
 	case "run":
-		err = commandRun(os.Args[2:])
+		return commandOCIRun(args[1:])
 	case "help", "-h", "--help":
-		usage()
-		return
+		fmt.Fprintln(os.Stderr, `Usage:
+  macker oci build   [flags]
+  macker oci inspect [flags] IMAGE
+  macker oci unpack  [flags] IMAGE
+  macker oci run     [flags] IMAGE [-- COMMAND ARG...]
+
+--tty attaches the caller's terminal; --interactive keeps standard input
+attached.`)
+		return nil
 	default:
-		usage()
-		os.Exit(2)
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("unknown oci command %q", args[0])
 	}
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `darwin-oci - small OCI image experiment for native macOS workloads
-
-Usage:
-  darwin-oci build   [flags]
-  darwin-oci inspect [flags] IMAGE
-  darwin-oci unpack  [flags] IMAGE
-  darwin-oci run     [flags] IMAGE [-- COMMAND ARG...]
-
-The image argument is an OCI image layout directory, not a Docker daemon image.`)
-}
-
-func commandBuild(args []string) error {
+func commandOCIBuild(args []string) error {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	rootfs := fs.String("rootfs", "", "directory to package as the image root filesystem")
@@ -206,7 +181,7 @@ func commandBuild(args []string) error {
 	})
 }
 
-func commandInspect(args []string) error {
+func commandOCIInspect(args []string) error {
 	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	tag := fs.String("tag", "", "OCI layout reference name; defaults to the first manifest")
@@ -234,7 +209,7 @@ func commandInspect(args []string) error {
 	return nil
 }
 
-func commandUnpack(args []string) error {
+func commandOCIUnpack(args []string) error {
 	fs := flag.NewFlagSet("unpack", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	output := fs.String("output", "", "directory to create for the unpacked root filesystem")
@@ -262,7 +237,8 @@ func commandUnpack(args []string) error {
 	return unpackImage(img, *output, *force)
 }
 
-func commandRun(args []string) error {
+func commandOCIRun(args []string) error {
+	args = expandInteractiveShortFlags(args)
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	tag := fs.String("tag", "", "OCI layout reference name; defaults to the first manifest")
@@ -270,6 +246,13 @@ func commandRun(args []string) error {
 	chroot := fs.Bool("chroot", false, "run with the extracted directory as the process root; requires root on macOS")
 	skipUnpack := fs.Bool("skip-unpack", false, "use --rootfs as an already-unpacked rootfs")
 	allowMismatch := fs.Bool("allow-platform-mismatch", false, "allow running a non-Darwin or non-native architecture image")
+	interactive := fs.Bool("i", false, "keep standard input open")
+	tty := fs.Bool("t", false, "attach the caller's terminal")
+	hostFallback := fs.Bool("host-fallback", false, "allow an image command to fall back to a host executable")
+	pidFile := fs.String("pid-file", "", "write the workload PID to this internal file")
+	entrypoint := fs.String("entrypoint", "", "override the image entrypoint")
+	fs.BoolVar(interactive, "interactive", false, "keep standard input open")
+	fs.BoolVar(tty, "tty", false, "attach the caller's terminal")
 	var env stringList
 	var commandArgs stringList
 	fs.Var(&env, "env", "environment variable KEY=VALUE override (repeatable)")
@@ -298,6 +281,9 @@ func commandRun(args []string) error {
 
 	extractDir := *rootfs
 	ownedRootFS := false
+	if *tty && *chroot {
+		return errors.New("--tty cannot be combined with --chroot")
+	}
 	if *skipUnpack {
 		if extractDir == "" {
 			return errors.New("--skip-unpack requires --rootfs")
@@ -310,7 +296,7 @@ func commandRun(args []string) error {
 			return fmt.Errorf("existing rootfs %q is not a normal directory", extractDir)
 		}
 	} else if extractDir == "" {
-		extractDir, err = os.MkdirTemp("", "darwin-oci-rootfs-")
+		extractDir, err = os.MkdirTemp("", "macker-rootfs-")
 		if err != nil {
 			return fmt.Errorf("create temporary rootfs: %w", err)
 		}
@@ -327,15 +313,7 @@ func commandRun(args []string) error {
 		}
 	}
 
-	command := append([]string(nil), img.Config.Config.Entrypoint...)
-	command = append(command, img.Config.Config.Cmd...)
-	command = append(command, commandArgs...)
-	if len(commandOverride) > 0 {
-		command = commandOverride
-	}
-	if len(command) == 0 {
-		command = []string{defaultImageCommand}
-	}
+	command := selectImageCommand(*entrypoint, img.Config.Config.Entrypoint, img.Config.Config.Cmd, commandArgs, commandOverride)
 
 	workdir := img.Config.Config.WorkingDir
 	if workdir == "" {
@@ -346,8 +324,16 @@ func commandRun(args []string) error {
 	}
 
 	envVars := mergeEnvironment(img.Config.Config.Env, env)
+	if *tty {
+		envVars = ensureTerminalEnvironment(envVars)
+	}
+	if replacedFiles, err := substituteMackerConfig(extractDir, mackerEnvironmentValues(envVars)); err != nil {
+		return err
+	} else if replacedFiles > 0 {
+		fmt.Fprintf(os.Stderr, "substituted Macker tokens in %d config file(s)\n", replacedFiles)
+	}
 	imageCommand, err := resolveImageCommand(extractDir, command[0], workdir, envVars)
-	if err != nil {
+	if err != nil && ((*entrypoint == "" && !*hostFallback) || *chroot) {
 		return err
 	}
 
@@ -358,15 +344,31 @@ func commandRun(args []string) error {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Chroot: extractDir, Setpgid: true}
 	} else {
 		hostCommand := filepath.Join(extractDir, filepath.FromSlash(strings.TrimPrefix(imageCommand, "/")))
+		usingHostEntrypoint := false
+		if (*entrypoint != "" || *hostFallback) && (err != nil || !isExecutableFile(hostCommand)) {
+			hostCommand, err = resolveHostCommand(command[0])
+			if err != nil {
+				return fmt.Errorf("resolve command %q in image or on host: %w", command[0], err)
+			}
+			usingHostEntrypoint = true
+		}
+		if usingHostEntrypoint {
+			fmt.Fprintf(os.Stderr, "warning: command %q is not in the image; using host executable %s\n", command[0], hostCommand)
+		}
 		cmd = exec.Command(hostCommand, command[1:]...)
 		cmd.Dir = filepath.Join(extractDir, filepath.FromSlash(strings.TrimPrefix(workdir, "/")))
-		// Keep non-chroot workloads in their own process group too. Detached
-		// Macker workloads rely on darwin-oci forwarding stop signals to the
-		// complete workload process tree.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		// Keep non-TTY workloads in their own process group so signals can
+		// reach the complete workload process tree. A TTY workload must remain
+		// in the caller's terminal process group or it cannot read the
+		// caller's terminal without receiving SIGTTIN.
+		if !*tty {
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		}
 	}
 	cmd.Env = envVars
-	cmd.Stdin = os.Stdin
+	if *interactive || *tty {
+		cmd.Stdin = os.Stdin
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -375,6 +377,19 @@ func commandRun(args []string) error {
 			return fmt.Errorf("start %s (chroot=%s): %w; try without --chroot to test the Mach-O executable first", imageCommand, extractDir, err)
 		}
 		return fmt.Errorf("start %s: %w", imageCommand, err)
+	}
+	if *pidFile != "" {
+		processGroup := 1
+		if *tty {
+			processGroup = 0
+		}
+		pidData := []byte(fmt.Sprintf("%d %d %d\n", cmd.Process.Pid, os.Getpid(), processGroup))
+		if err := os.WriteFile(*pidFile, pidData, 0o600); err != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			_ = cmd.Wait()
+			return fmt.Errorf("write workload PID file: %w", err)
+		}
+		defer os.Remove(*pidFile)
 	}
 
 	// Setpgid lets Ctrl-C and termination reach descendants of the workload.
@@ -385,7 +400,11 @@ func commandRun(args []string) error {
 	go func() {
 		sig := <-signals
 		if signal, ok := sig.(syscall.Signal); ok && cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, signal)
+			target := cmd.Process.Pid
+			if !*tty {
+				target = -target
+			}
+			_ = syscall.Kill(target, signal)
 		}
 	}()
 
@@ -453,7 +472,7 @@ func buildImage(opts buildOptions) (err error) {
 			Type:    "layers",
 			DiffIDs: []string{layerDigest},
 		},
-		History: []historyEntry{{Created: created, CreatedBy: "darwin-oci build"}},
+		History: []historyEntry{{Created: created, CreatedBy: "macker oci build"}},
 	}
 	configBytes, err := json.Marshal(config)
 	if err != nil {
@@ -515,7 +534,7 @@ func buildImage(opts buildOptions) (err error) {
 }
 
 func makeLayer(root string) (path string, digest string, size int64, err error) {
-	file, err := os.CreateTemp("", "darwin-oci-layer-*.tar")
+	file, err := os.CreateTemp("", "macker-layer-*.tar")
 	if err != nil {
 		return "", "", 0, fmt.Errorf("create temporary layer: %w", err)
 	}
@@ -774,7 +793,7 @@ func applyTarLayer(root string, input io.Reader) error {
 		if parentRel == "." {
 			parentRel = ""
 		}
-		if err := ensureNoSymlinkParents(root, parentRel); err != nil {
+		if err := ensureOCINoSymlinkParents(root, parentRel); err != nil {
 			return err
 		}
 
@@ -785,7 +804,7 @@ func applyTarLayer(root string, input io.Reader) error {
 			}
 			directoryModes[rel] = fs.FileMode(header.Mode).Perm()
 		case tar.TypeReg, tar.TypeRegA:
-			if err := removeExisting(target); err != nil {
+			if err := removeOCIExisting(target); err != nil {
 				return err
 			}
 			file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -804,7 +823,7 @@ func applyTarLayer(root string, input io.Reader) error {
 				return fmt.Errorf("chmod %q: %w", rel, err)
 			}
 		case tar.TypeSymlink:
-			if err := removeExisting(target); err != nil {
+			if err := removeOCIExisting(target); err != nil {
 				return err
 			}
 			if err := os.Symlink(header.Linkname, target); err != nil {
@@ -819,10 +838,10 @@ func applyTarLayer(root string, input io.Reader) error {
 			if err != nil {
 				return err
 			}
-			if err := ensureNoSymlinkParents(root, path.Dir(linkRel)); err != nil {
+			if err := ensureOCINoSymlinkParents(root, path.Dir(linkRel)); err != nil {
 				return err
 			}
-			if err := removeExisting(target); err != nil {
+			if err := removeOCIExisting(target); err != nil {
 				return err
 			}
 			if err := os.Link(linkTarget, target); err != nil {
@@ -858,7 +877,7 @@ func applyWhiteout(root, rel string) error {
 	if parent == "." {
 		parent = ""
 	}
-	if err := ensureNoSymlinkParents(root, parent); err != nil {
+	if err := ensureOCINoSymlinkParents(root, parent); err != nil {
 		return err
 	}
 	parentPath, err := safePath(root, parent)
@@ -920,7 +939,7 @@ func safePath(root, rel string) (string, error) {
 	return filepath.Join(root, filepath.FromSlash(clean)), nil
 }
 
-func ensureNoSymlinkParents(root, rel string) error {
+func ensureOCINoSymlinkParents(root, rel string) error {
 	if rel == "" || rel == "." {
 		return nil
 	}
@@ -952,7 +971,7 @@ func ensureDirectory(target string) error {
 	info, err := os.Lstat(target)
 	if err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			if err := removeExisting(target); err != nil {
+			if err := removeOCIExisting(target); err != nil {
 				return err
 			}
 			return os.Mkdir(target, 0o755)
@@ -965,7 +984,7 @@ func ensureDirectory(target string) error {
 	return os.MkdirAll(target, 0o755)
 }
 
-func removeExisting(target string) error {
+func removeOCIExisting(target string) error {
 	info, err := os.Lstat(target)
 	if os.IsNotExist(err) {
 		return nil
@@ -1008,6 +1027,48 @@ func (c *compoundReadCloser) Close() error {
 		}
 	}
 	return first
+}
+
+func selectImageCommand(entrypointOverride string, imageEntrypoint, imageCmd, commandArgs, commandOverride []string) []string {
+	command := append([]string(nil), imageEntrypoint...)
+	if entrypointOverride != "" {
+		command = []string{entrypointOverride}
+	}
+	command = append(command, imageCmd...)
+	command = append(command, commandArgs...)
+	if len(commandOverride) > 0 {
+		if entrypointOverride != "" {
+			command = append([]string{entrypointOverride}, commandOverride...)
+		} else {
+			command = append([]string(nil), commandOverride...)
+		}
+	}
+	if len(command) == 0 {
+		command = []string{defaultImageCommand}
+	}
+	return command
+}
+
+func isExecutableFile(filename string) bool {
+	info, err := os.Stat(filename)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+func resolveHostCommand(command string) (string, error) {
+	if strings.Contains(command, "/") {
+		if !strings.HasPrefix(command, "/") {
+			return "", fmt.Errorf("host entrypoint path %q is not absolute", command)
+		}
+		if !isExecutableFile(command) {
+			return "", fmt.Errorf("host entrypoint %q is not executable", command)
+		}
+		return command, nil
+	}
+	resolved, err := exec.LookPath(command)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 func resolveImageCommand(rootfs, command, workdir string, env []string) (string, error) {
@@ -1072,6 +1133,19 @@ func environmentValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+func ensureTerminalEnvironment(env []string) []string {
+	for _, value := range env {
+		if name, _, ok := strings.Cut(value, "="); ok && name == "TERM" {
+			return env
+		}
+	}
+	term := os.Getenv("TERM")
+	if term == "" {
+		term = "xterm-256color"
+	}
+	return append(append([]string(nil), env...), "TERM="+term)
 }
 
 func digestBytes(data []byte) string {

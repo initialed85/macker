@@ -113,8 +113,9 @@ Push or pull a Darwin image:
 ```
 
 `pull` selects the native `darwin/arm64` manifest from a multi-platform image
-and installs it locally. Image references must be tagged; Docker Hub is
-assumed when no registry is specified.
+and installs it locally. Registry image references must be tagged; Docker Hub
+is assumed when no registry is specified. The local `scratch` sentinel is the
+exception and may be written as either `scratch` or `scratch:latest`.
 
 `bundle` combines a source image with a locally stored Darwin image. A source
 is read from local storage when present, otherwise pulled from its registry.
@@ -132,7 +133,11 @@ application behaviour across platforms.
 ## Running workloads
 
 `run` requires explicit `--net=host` or `--net=external` networking and a
-name. Repeat `--env KEY=VALUE` to add or override image environment values;
+name. The special image references `scratch` and `scratch:latest` create an
+empty Darwin rootfs on demand without pulling or registering an image. Scratch
+has no image command, so Macker uses the trusted host-command fallback (default
+`/bin/sh`, or an explicit `--entrypoint`) and is intended for volume-mounted
+jobs and scripts. Repeat `--env KEY=VALUE` to add or override image environment values;
 these values are persisted with the container and inherited by `exec`. Foreground
 runs inherit the terminal for output; use `-i` to attach
 standard input and `-t` to attach the caller's terminal (`-it` is the usual
@@ -221,6 +226,14 @@ and IP values can also be supplied when the attached network exposes them:
   --name=nginx \
   -p 80:8080/tcp \
   initialed85/nginx-darwin:latest
+
+# A volume-mounted script can run without building or pulling an image.
+./bin/macker run --rm --net=external \
+  --interface bridge101 --ip 10.42.1.4 \
+  --name=job \
+  --entrypoint /job/run.sh \
+  -v "$PWD/job:/job" \
+  scratch
 ```
 
 For an interactive debug shell, use an image containing a shell or let Macker

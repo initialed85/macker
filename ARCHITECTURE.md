@@ -135,19 +135,22 @@ A high-level `run` performs these phases before launching the workload:
 
 1. Parse and validate networking, environment, volume, entrypoint, and publish
    options.
-2. Resolve `NODE_PORT=auto` or `NODE_PORT=0` mappings. Automatic ports are
+2. Resolve the image. `scratch` and `scratch:latest` are local sentinels: Macker
+   creates/reuses a minimal empty Darwin OCI layout under its temporary state
+   directory and never pulls or registers it as a user image.
+3. Resolve `NODE_PORT=auto` or `NODE_PORT=0` mappings. Automatic ports are
    selected randomly from `30000-32767`, avoiding live Macker mappings and
    currently bindable host TCP/UDP ports.
-3. Check published host-port conflicts. External target-IP mappings may reuse a
+4. Check published host-port conflicts. External target-IP mappings may reuse a
    host port when their target Pod IPs differ; host-mode mappings reserve the
    port globally.
-4. Create or validate the requested network.
-5. Unpack the selected Darwin image into a fresh container rootfs.
-6. Merge image and run environment values, then substitute `____MACKER_*____`
+5. Create or validate the requested network.
+6. Unpack the selected Darwin image into a fresh container rootfs.
+7. Merge image and run environment values, then substitute `____MACKER_*____`
    tokens in recognized regular UTF-8 configuration files.
-7. Install volume mappings as host-path symlinks.
-8. Install PF redirects for published ports.
-9. Persist metadata and launch the OCI process.
+8. Install volume mappings as host-path symlinks.
+9. Install PF redirects for published ports.
+10. Persist metadata and launch the OCI process.
 
 The stored image layout is never used as a writable container rootfs. Each run
 gets its own materialized rootfs, so runtime mutations do not modify the image.
@@ -166,7 +169,10 @@ executable fallback for debugging when the command is absent from the image.
 The experimental `--chroot` option changes the child filesystem root only. A
 usable Darwin chroot needs a compatible dyld/system-library environment, and
 macOS chroot is not treated as process or filesystem isolation. The normal
-Macker path is therefore non-chroot native execution.
+Macker path is therefore non-chroot native execution. Scratch runs have no
+image entrypoint, command, or files; the high-level runtime allows the trusted
+host-command fallback so `/bin/sh`, an explicit entrypoint, or a
+volume-mounted executable can be used against the empty rootfs.
 
 ## Networking and port publishing
 

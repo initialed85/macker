@@ -1079,9 +1079,18 @@ func commandRun(args []string) error {
 	if err := checkPublishedPortConflictsForTarget(home, *name, conflictTargetIP, ports); err != nil {
 		return err
 	}
-	layout := imageLayoutPath(home, ref)
-	if err := requireLayout(layout); err != nil {
-		return fmt.Errorf("run %s: %w; pull or build it first", ref.Normalized, err)
+	scratch := isScratchImage(ref)
+	var layout string
+	if scratch {
+		layout, err = ensureScratchLayout(home)
+		if err != nil {
+			return err
+		}
+	} else {
+		layout = imageLayoutPath(home, ref)
+		if err := requireLayout(layout); err != nil {
+			return fmt.Errorf("run %s: %w; pull or build it first", ref.Normalized, err)
+		}
 	}
 	containerDir := filepath.Join(home, "containers", *name)
 	if err := os.MkdirAll(filepath.Dir(containerDir), 0o755); err != nil {
@@ -1176,6 +1185,12 @@ func commandRun(args []string) error {
 	}
 	exitPath := filepath.Join(containerDir, "exit.json")
 	ociRunArgs := []string{"--skip-unpack", "--rootfs", rootfs, "--status-file", exitPath}
+	if scratch {
+		// Scratch has no command in its image config. Permit the normal host
+		// fallback so a default shell or an explicitly supplied command can
+		// run against the mounted rootfs.
+		ociRunArgs = append(ociRunArgs, "--host-fallback")
+	}
 	if *interactive {
 		ociRunArgs = append(ociRunArgs, "--interactive")
 	}
@@ -2344,6 +2359,56 @@ func registerImageState(home string, ref imageRef, layout string) error {
 func imageLayoutPath(home string, ref imageRef) string {
 	digest := sha256.Sum256([]byte(ref.Normalized))
 	return filepath.Join(home, "images", hex.EncodeToString(digest[:]))
+}
+
+func isScratchImage(ref imageRef) bool {
+	return ref.Registry == "docker.io" && ref.Repository == "library/scratch" && ref.Tag == "latest"
+}
+
+func ensureScratchLayout(home string) (string, error) {
+	if err := ensureStorage(home); err != nil {
+		return "", err
+	}
+	layout := filepath.Join(home, "tmp", "scratch")
+	if _, err := os.Stat(layout); err == nil {
+		if err := requireLayout(layout); err != nil {
+			return "", fmt.Errorf("validate implicit scratch image: %w", err)
+		}
+		return layout, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect implicit scratch image: %w", err)
+	}
+
+	emptyRootFS, err := os.MkdirTemp(filepath.Join(home, "tmp"), "scratch-rootfs-")
+	if err != nil {
+		return "", fmt.Errorf("create implicit scratch rootfs: %w", err)
+	}
+	defer os.RemoveAll(emptyRootFS)
+	staging, err := os.MkdirTemp(filepath.Join(home, "tmp"), "scratch-layout-")
+	if err != nil {
+		return "", fmt.Errorf("create implicit scratch layout: %w", err)
+	}
+	if err := os.RemoveAll(staging); err != nil {
+		return "", fmt.Errorf("prepare implicit scratch layout: %w", err)
+	}
+	if err := buildImage(buildOptions{
+		RootFS:       emptyRootFS,
+		Output:       staging,
+		Tag:          "scratch:latest",
+		Architecture: runtime.GOARCH,
+		WorkingDir:   "/",
+		Quiet:        true,
+	}); err != nil {
+		return "", fmt.Errorf("create implicit scratch image: %w", err)
+	}
+	if err := os.Rename(staging, layout); err != nil {
+		_ = os.RemoveAll(staging)
+		if requireErr := requireLayout(layout); requireErr == nil {
+			return layout, nil
+		}
+		return "", fmt.Errorf("install implicit scratch image: %w", err)
+	}
+	return layout, nil
 }
 
 func requireLayout(layout string) error {

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,58 @@ func TestParseImageRefAddsDockerHubLibrary(t *testing.T) {
 	}
 	if ref.Normalized != "docker.io/library/nginx-darwin:latest" {
 		t.Fatalf("normalized reference = %q", ref.Normalized)
+	}
+}
+
+func TestIsScratchImage(t *testing.T) {
+	for _, input := range []string{"scratch", "scratch:latest", "docker.io/library/scratch:latest", "library/scratch:latest"} {
+		ref, err := parseImageRef(input)
+		if err != nil {
+			t.Fatalf("parseImageRef(%q): %v", input, err)
+		}
+		if !isScratchImage(ref) {
+			t.Fatalf("isScratchImage(%q) = false", input)
+		}
+	}
+	for _, input := range []string{"scratch:dev", "example/scratch:latest", "docker.io/library/scratch:v1"} {
+		ref, err := parseImageRef(input)
+		if err != nil {
+			t.Fatalf("parseImageRef(%q): %v", input, err)
+		}
+		if isScratchImage(ref) {
+			t.Fatalf("isScratchImage(%q) = true", input)
+		}
+	}
+}
+
+func TestEnsureScratchLayout(t *testing.T) {
+	home := t.TempDir()
+	layout, err := ensureScratchLayout(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout != filepath.Join(home, "tmp", "scratch") {
+		t.Fatalf("scratch layout = %q", layout)
+	}
+	image, err := loadImage(layout, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image.Config.OS != "darwin" || image.Config.Architecture != runtime.GOARCH {
+		t.Fatalf("scratch platform = %s/%s", image.Config.OS, image.Config.Architecture)
+	}
+	if len(image.Config.Config.Entrypoint) != 0 || len(image.Config.Config.Cmd) != 0 || image.Config.Config.WorkingDir != "/" {
+		t.Fatalf("scratch config = %#v", image.Config.Config)
+	}
+	if len(image.Manifest.Layers) != 1 {
+		t.Fatalf("scratch layers = %d, want 1", len(image.Manifest.Layers))
+	}
+	second, err := ensureScratchLayout(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != layout {
+		t.Fatalf("second scratch layout = %q, want %q", second, layout)
 	}
 }
 

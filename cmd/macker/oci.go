@@ -108,6 +108,7 @@ type buildOptions struct {
 	Args         []string
 	Env          []string
 	WorkingDir   string
+	Quiet        bool
 }
 
 func commandOCI(args []string) error {
@@ -573,16 +574,19 @@ func buildImage(opts buildOptions) (err error) {
 	}
 
 	created := time.Now().UTC().Format(time.RFC3339Nano)
+	configRuntime := runtimeConfig{
+		Env:        append([]string(nil), opts.Env...),
+		Cmd:        append([]string(nil), opts.Args...),
+		WorkingDir: opts.WorkingDir,
+	}
+	if opts.Entrypoint != "" {
+		configRuntime.Entrypoint = []string{opts.Entrypoint}
+	}
 	config := imageConfig{
 		Created:      created,
 		Architecture: opts.Architecture,
 		OS:           "darwin",
-		Config: runtimeConfig{
-			Env:        append([]string(nil), opts.Env...),
-			Entrypoint: []string{opts.Entrypoint},
-			Cmd:        append([]string(nil), opts.Args...),
-			WorkingDir: opts.WorkingDir,
-		},
+		Config:       configRuntime,
 		RootFS: rootFS{
 			Type:    "layers",
 			DiffIDs: []string{layerDigest},
@@ -643,8 +647,10 @@ func buildImage(opts buildOptions) (err error) {
 		return fmt.Errorf("write index: %w", err)
 	}
 
-	fmt.Printf("created %s (%s/%s)\n", opts.Output, config.OS, config.Architecture)
-	fmt.Printf("manifest: %s\n", manifestDigest)
+	if !opts.Quiet {
+		fmt.Printf("created %s (%s/%s)\n", opts.Output, config.OS, config.Architecture)
+		fmt.Printf("manifest: %s\n", manifestDigest)
+	}
 	return nil
 }
 

@@ -262,7 +262,10 @@ rootfs, volumes, PF mappings, and network configuration. `unpause NAME` sends
 `SIGCONT` and clears that state. Paused containers remain visible in `ps` and
 `inspect`; `exec` is unavailable while paused. This is process-group control,
 not namespace or resource isolation, and workloads that daemonize into another
-session are outside Macker's process-group guarantee. `stop` remains the
+session are outside Macker's process-group guarantee. Before signaling, Macker
+validates the recorded launcher/workload PID start times; missing or mismatched
+identity fails without marking the container paused. Signal or metadata failures
+attempt to roll back the process state. `stop` remains the
 terminating/cleanup operation: if a container is paused, it is resumed before
 being terminated and its PF/network resources are removed. Exact command
 replay after a destructive stop is not part of this lifecycle yet.
@@ -277,8 +280,8 @@ record before printing:
 ```
 
 The JSON object includes `status` (`running`, `paused`, `exited`, or `stopped`),
-the tracked launcher `pid`, the running or completed workload `workload_pid`
-when available, `exit_code` (including the conventional `128 + signal` value
+the tracked launcher `pid` and `launcher_started_at`, the running or completed
+workload `workload_pid` and `workload_started_at` when available, `exit_code` (including the conventional `128 + signal` value
 for signal termination), `started_at`, `finished_at`, `termination_signal`,
 `termination_reason` (`exited`, `exited-with-error`, `signal`, or `stopped`),
 and `paused_at` when the workload is suspended. The object also includes

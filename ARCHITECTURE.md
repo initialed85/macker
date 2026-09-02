@@ -184,8 +184,12 @@ place. `macker unpause NAME` sends `SIGCONT` and clears `PausedAt`. `ps` and
 `inspect` report `paused`, while reconciliation deliberately does not clean up
 paused resources. This is best-effort process-group control: a workload that
 creates a new session can escape the tracked group, and no namespace or
-resource-limit isolation is implied. `stop` remains separate and resumes a
-paused workload before terminating it and cleaning its PF/network resources.
+resource-limit isolation is implied. Before signaling, Macker validates the
+recorded launcher/workload PID start times to reduce PID-reuse risk. Missing or
+mismatched identity fails without changing the persisted paused state; signal
+or metadata failures attempt to roll back the process state. `stop` remains
+separate and resumes a paused workload before terminating it and cleaning its
+PF/network resources.
 
 The pause path does not replay or reconstruct the original invocation. A
 future restart operation will need persisted command/entrypoint configuration
@@ -317,7 +321,7 @@ pause/unpause to target its dedicated process group; the file is removed when
 the workload exits. `inspect` and `ps` reconcile the exit record after
 confirming the launcher has exited. `inspect --format json NAME` reports the
 main workload as one machine-readable object, including resolved port mappings
-and `paused_at` when suspended:
+and `launcher_started_at`, `workload_started_at`, and `paused_at` when suspended:
 
 ```json
 {
@@ -325,12 +329,15 @@ and `paused_at` when suspended:
   "image": "docker.io/initialed85/nginx:latest",
   "status": "exited",
   "pid": 12345,
+  "launcher_started_at": null,
   "workload_pid": 12347,
   "exit_code": 143,
   "started_at": "2026-08-30T10:23:27.266635Z",
   "finished_at": "2026-08-30T10:23:27.272232Z",
   "termination_signal": "SIGTERM",
   "termination_reason": "signal",
+  "paused_at": null,
+  "workload_started_at": null,
   "ports": [
     {"host_port": 8080, "node_port": 31543, "protocol": "tcp"}
   ]

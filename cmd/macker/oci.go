@@ -387,7 +387,7 @@ func commandOCIRun(args []string) error {
 		if *tty {
 			processGroup = 0
 		}
-		pidData := []byte(fmt.Sprintf("%d %d %d\n", cmd.Process.Pid, os.Getpid(), processGroup))
+		pidData := []byte(fmt.Sprintf("%d %d %d %s\n", cmd.Process.Pid, os.Getpid(), processGroup, startedAt.Format(time.RFC3339Nano)))
 		if err := os.WriteFile(*pidFile, pidData, 0o600); err != nil {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			_ = cmd.Wait()

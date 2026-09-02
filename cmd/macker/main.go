@@ -121,8 +121,10 @@ type containerMetadata struct {
 	StartedAt         *time.Time     `json:"started_at,omitempty"`
 	FinishedAt        *time.Time     `json:"finished_at,omitempty"`
 	PID               int            `json:"pid,omitempty"`
+	LauncherStartedAt *time.Time     `json:"launcher_started_at,omitempty"`
 	WorkloadPID       int            `json:"workload_pid,omitempty"`
 	WorkloadPGID      int            `json:"workload_pgid,omitempty"`
+	WorkloadStartedAt *time.Time     `json:"workload_started_at,omitempty"`
 	ExitPID           int            `json:"exit_pid,omitempty"`
 	ExitCode          *int           `json:"exit_code,omitempty"`
 	TerminationSignal string         `json:"termination_signal,omitempty"`
@@ -154,6 +156,7 @@ type containerInspection struct {
 	Image             string        `json:"image"`
 	Status            string        `json:"status"`
 	PID               int           `json:"pid"`
+	LauncherStartedAt *time.Time    `json:"launcher_started_at"`
 	WorkloadPID       int           `json:"workload_pid"`
 	ExitCode          *int          `json:"exit_code"`
 	StartedAt         *time.Time    `json:"started_at"`
@@ -161,6 +164,7 @@ type containerInspection struct {
 	TerminationSignal string        `json:"termination_signal"`
 	TerminationReason string        `json:"termination_reason"`
 	PausedAt          *time.Time    `json:"paused_at"`
+	WorkloadStartedAt *time.Time    `json:"workload_started_at"`
 	Ports             []portMapping `json:"ports"`
 }
 
@@ -1236,9 +1240,13 @@ func commandRun(args []string) error {
 			return err
 		}
 		metadata.PID = pid
-		if workloadPID, workloadPGID, workloadErr := waitForWorkloadProcessInfo(workloadPIDPath, pid, 2*time.Second); workloadErr == nil {
-			metadata.WorkloadPID = workloadPID
-			metadata.WorkloadPGID = workloadPGID
+		if launcherStartedAt, launcherErr := processStartTime(pid); launcherErr == nil {
+			metadata.LauncherStartedAt = &launcherStartedAt
+		}
+		if workloadInfo, workloadErr := waitForWorkloadProcessInfo(workloadPIDPath, pid, 2*time.Second); workloadErr == nil {
+			metadata.WorkloadPID = workloadInfo.PID
+			metadata.WorkloadPGID = workloadInfo.PGID
+			metadata.WorkloadStartedAt = workloadInfo.StartedAt
 		}
 		if err := writeContainerMetadata(containerDir, metadata); err != nil {
 			_ = syscall.Kill(pid, syscall.SIGTERM)
@@ -1274,8 +1282,10 @@ func commandRun(args []string) error {
 	pfInstalled = false
 	networkInstalled = false
 	metadata.PID = 0
+	metadata.LauncherStartedAt = nil
 	metadata.WorkloadPID = 0
 	metadata.WorkloadPGID = 0
+	metadata.WorkloadStartedAt = nil
 	stoppedAt := time.Now().UTC()
 	metadata.StoppedAt = &stoppedAt
 	resourceCleanupErr := cleanupContainerResources(home, *name, &metadata)
@@ -1408,20 +1418,29 @@ func stopExecProcesses(containerDir string) error {
 			continue
 		}
 		fields := strings.Fields(string(data))
-		if len(fields) != 2 && len(fields) != 3 {
+		if len(fields) < 2 || len(fields) > 4 {
 			_ = os.Remove(pidFile)
 			continue
 		}
 		pid, pidErr := strconv.Atoi(fields[0])
 		ownerPID, ownerErr := strconv.Atoi(fields[1])
 		processGroup := true
-		if len(fields) == 3 {
+		if len(fields) >= 3 {
 			groupValue, groupErr := strconv.Atoi(fields[2])
 			if groupErr != nil || (groupValue != 0 && groupValue != 1) {
 				_ = os.Remove(pidFile)
 				continue
 			}
 			processGroup = groupValue == 1
+		}
+		var expectedStart *time.Time
+		if len(fields) == 4 {
+			startedAt, startErr := time.Parse(time.RFC3339Nano, fields[3])
+			if startErr != nil {
+				_ = os.Remove(pidFile)
+				continue
+			}
+			expectedStart = &startedAt
 		}
 		if pidErr != nil || ownerErr != nil || pid <= 0 || ownerPID <= 0 {
 			_ = os.Remove(pidFile)
@@ -1431,6 +1450,12 @@ func stopExecProcesses(containerDir string) error {
 		if parentErr != nil || parentPID != ownerPID {
 			_ = os.Remove(pidFile)
 			continue
+		}
+		if expectedStart != nil {
+			if startErr := validateProcessStartTime(pid, *expectedStart); startErr != nil {
+				_ = os.Remove(pidFile)
+				continue
+			}
 		}
 		alive, err := processAlive(pid)
 		if err != nil {
@@ -1581,6 +1606,7 @@ func commandInspect(args []string) error {
 		Image:             metadata.Image,
 		Status:            status,
 		PID:               metadata.PID,
+		LauncherStartedAt: metadata.LauncherStartedAt,
 		WorkloadPID:       workloadPID,
 		ExitCode:          metadata.ExitCode,
 		StartedAt:         metadata.StartedAt,
@@ -1588,6 +1614,7 @@ func commandInspect(args []string) error {
 		TerminationSignal: metadata.TerminationSignal,
 		TerminationReason: metadata.TerminationReason,
 		PausedAt:          metadata.PausedAt,
+		WorkloadStartedAt: metadata.WorkloadStartedAt,
 		Ports:             append([]portMapping{}, metadata.Ports...),
 	}
 	if *jsonOutput {
@@ -1649,8 +1676,10 @@ func applyProcessExitInfo(metadata *containerMetadata, info processExitInfo) {
 	finishedAt := info.FinishedAt
 	metadata.StartedAt = &startedAt
 	metadata.FinishedAt = &finishedAt
+	metadata.LauncherStartedAt = nil
 	metadata.WorkloadPID = 0
 	metadata.WorkloadPGID = 0
+	metadata.WorkloadStartedAt = nil
 	metadata.PausedAt = nil
 	metadata.ExitPID = info.PID
 	if info.ExitCode == nil {
@@ -1704,6 +1733,11 @@ func commandStop(args []string) error {
 	}
 	if _, err := refreshContainerExitInfo(containerDir, &metadata); err != nil {
 		return fmt.Errorf("refresh container %q exit information: %w", name, err)
+	}
+	if metadata.PID > 0 {
+		if err := validateLauncherProcessIdentity(metadata); err != nil {
+			return fmt.Errorf("validate container %q launcher: %w", name, err)
+		}
 	}
 	if metadata.PausedAt != nil {
 		if err := signalContainerProcessGroups(containerDir, metadata, syscall.SIGCONT); err != nil {
@@ -1765,8 +1799,10 @@ func commandStop(args []string) error {
 		metadata.TerminationReason = "stopped"
 	}
 	metadata.PID = 0
+	metadata.LauncherStartedAt = nil
 	metadata.WorkloadPID = 0
 	metadata.WorkloadPGID = 0
+	metadata.WorkloadStartedAt = nil
 	stoppedAt := time.Now().UTC()
 	metadata.StoppedAt = &stoppedAt
 	if err := writeContainerMetadata(containerDir, metadata); err != nil {
@@ -1827,16 +1863,8 @@ func commandPause(args []string) error {
 	if metadata.PID <= 0 {
 		return fmt.Errorf("container %q is not a detached workload", name)
 	}
-	workloadPID, _, err := containerWorkloadProcessInfo(containerDir, metadata)
-	if err != nil {
+	if _, err := validateContainerProcessIdentity(containerDir, metadata); err != nil {
 		return fmt.Errorf("pause container %q: %w", name, err)
-	}
-	alive, err := processAlive(workloadPID)
-	if err != nil {
-		return fmt.Errorf("check container %q workload: %w", name, err)
-	}
-	if !alive {
-		return fmt.Errorf("container %q workload is no longer running", name)
 	}
 	if err := signalContainerProcessGroups(containerDir, metadata, syscall.SIGSTOP); err != nil {
 		resumeErr := signalContainerProcessGroups(containerDir, metadata, syscall.SIGCONT)
@@ -1891,16 +1919,8 @@ func commandUnpause(args []string) error {
 	if status != "paused" {
 		return fmt.Errorf("container %q is %s, not paused", name, status)
 	}
-	workloadPID, _, err := containerWorkloadProcessInfo(containerDir, metadata)
-	if err != nil {
+	if _, err := validateContainerProcessIdentity(containerDir, metadata); err != nil {
 		return fmt.Errorf("unpause container %q: %w", name, err)
-	}
-	alive, err := processAlive(workloadPID)
-	if err != nil {
-		return fmt.Errorf("check container %q workload: %w", name, err)
-	}
-	if !alive {
-		return fmt.Errorf("container %q workload is no longer running", name)
 	}
 	if err := signalContainerProcessGroups(containerDir, metadata, syscall.SIGCONT); err != nil {
 		pauseErr := signalContainerProcessGroups(containerDir, metadata, syscall.SIGSTOP)
@@ -2698,65 +2718,164 @@ type processSignalTarget struct {
 	Group bool
 }
 
-func readWorkloadProcessInfo(path string, ownerPID int) (pid, pgid int, err error) {
+type workloadProcessInfo struct {
+	PID       int
+	PGID      int
+	StartedAt *time.Time
+}
+
+const processStartTimeTolerance = 2 * time.Second
+
+func processStartTime(pid int) (time.Time, error) {
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	if err != nil {
+		return time.Time{}, err
+	}
+	value := strings.TrimSpace(string(output))
+	if value == "" {
+		return time.Time{}, fmt.Errorf("process %d has no start time", pid)
+	}
+	for _, layout := range []string{
+		"Mon _2 Jan 15:04:05 2006", // Darwin
+		"Mon Jan _2 15:04:05 2006", // BSD/GNU variants
+		"Mon Jan 2 15:04:05 2006",
+	} {
+		if startedAt, parseErr := time.ParseInLocation(layout, value, time.Local); parseErr == nil {
+			return startedAt, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("parse process %d start time %q", pid, value)
+}
+
+func validateProcessStartTime(pid int, expected time.Time) error {
+	actual, err := processStartTime(pid)
+	if err != nil {
+		return err
+	}
+	delta := actual.Sub(expected)
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > processStartTimeTolerance {
+		return fmt.Errorf("process %d start time changed (recorded %s, current %s)", pid, expected.Format(time.RFC3339Nano), actual.Format(time.RFC3339Nano))
+	}
+	return nil
+}
+
+func readWorkloadProcessInfo(path string, ownerPID int) (workloadProcessInfo, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, 0, err
+		return workloadProcessInfo{}, err
 	}
 	fields := strings.Fields(string(data))
-	if len(fields) != 2 && len(fields) != 3 {
-		return 0, 0, fmt.Errorf("invalid workload PID file %q", path)
+	if len(fields) < 2 || len(fields) > 4 {
+		return workloadProcessInfo{}, fmt.Errorf("invalid workload PID file %q", path)
 	}
-	pid, err = strconv.Atoi(fields[0])
+	pid, err := strconv.Atoi(fields[0])
 	if err != nil || pid <= 0 {
-		return 0, 0, fmt.Errorf("invalid workload PID in %q", path)
+		return workloadProcessInfo{}, fmt.Errorf("invalid workload PID in %q", path)
 	}
 	fileOwner, err := strconv.Atoi(fields[1])
 	if err != nil || fileOwner <= 0 {
-		return 0, 0, fmt.Errorf("invalid workload PID owner in %q", path)
+		return workloadProcessInfo{}, fmt.Errorf("invalid workload PID owner in %q", path)
 	}
 	if ownerPID > 0 && fileOwner != ownerPID {
-		return 0, 0, fmt.Errorf("workload PID file %q belongs to launcher %d, not %d", path, fileOwner, ownerPID)
+		return workloadProcessInfo{}, fmt.Errorf("workload PID file %q belongs to launcher %d, not %d", path, fileOwner, ownerPID)
 	}
 	processGroup := true
-	if len(fields) == 3 {
+	if len(fields) >= 3 {
 		value, parseErr := strconv.Atoi(fields[2])
 		if parseErr != nil || (value != 0 && value != 1) {
-			return 0, 0, fmt.Errorf("invalid workload process-group flag in %q", path)
+			return workloadProcessInfo{}, fmt.Errorf("invalid workload process-group flag in %q", path)
 		}
 		processGroup = value == 1
 	}
-	if processGroup {
-		return pid, pid, nil
+	var startedAt *time.Time
+	if len(fields) == 4 {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, fields[3])
+		if parseErr != nil {
+			return workloadProcessInfo{}, fmt.Errorf("invalid workload start time in %q: %w", path, parseErr)
+		}
+		startedAt = &parsed
 	}
-	return pid, 0, nil
+	info := workloadProcessInfo{PID: pid, StartedAt: startedAt}
+	if processGroup {
+		info.PGID = pid
+	}
+	return info, nil
 }
 
-func waitForWorkloadProcessInfo(path string, ownerPID int, timeout time.Duration) (pid, pgid int, err error) {
+func waitForWorkloadProcessInfo(path string, ownerPID int, timeout time.Duration) (workloadProcessInfo, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		pid, pgid, err = readWorkloadProcessInfo(path, ownerPID)
+		info, err := readWorkloadProcessInfo(path, ownerPID)
 		if err == nil {
-			return pid, pgid, nil
+			return info, nil
 		}
 		lastErr = err
 		if time.Now().After(deadline) {
-			return 0, 0, lastErr
+			return workloadProcessInfo{}, lastErr
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 }
 
-func containerWorkloadProcessInfo(containerDir string, metadata containerMetadata) (pid, pgid int, err error) {
+func containerWorkloadProcessInfo(containerDir string, metadata containerMetadata) (workloadProcessInfo, error) {
 	if metadata.WorkloadPID > 0 {
-		pgid = metadata.WorkloadPGID
+		pgid := metadata.WorkloadPGID
 		if pgid == 0 {
 			pgid = metadata.WorkloadPID
 		}
-		return metadata.WorkloadPID, pgid, nil
+		return workloadProcessInfo{PID: metadata.WorkloadPID, PGID: pgid, StartedAt: metadata.WorkloadStartedAt}, nil
 	}
 	return readWorkloadProcessInfo(filepath.Join(containerDir, "workload.pid"), metadata.PID)
+}
+
+func validateLauncherProcessIdentity(metadata containerMetadata) error {
+	if metadata.PID <= 0 {
+		return errors.New("container launcher process is not available")
+	}
+	if metadata.LauncherStartedAt == nil {
+		return nil
+	}
+	if alive, err := processAlive(metadata.PID); err != nil {
+		return fmt.Errorf("check launcher process %d: %w", metadata.PID, err)
+	} else if !alive {
+		return fmt.Errorf("container launcher process %d is no longer running", metadata.PID)
+	}
+	if err := validateProcessStartTime(metadata.PID, *metadata.LauncherStartedAt); err != nil {
+		return fmt.Errorf("validate launcher process %d: %w", metadata.PID, err)
+	}
+	return nil
+}
+
+func validateContainerProcessIdentity(containerDir string, metadata containerMetadata) (workloadProcessInfo, error) {
+	if metadata.PID <= 0 {
+		return workloadProcessInfo{}, errors.New("container launcher process is not available")
+	}
+	if metadata.LauncherStartedAt == nil {
+		return workloadProcessInfo{}, errors.New("container launcher start time is unavailable; cannot safely validate the process")
+	}
+	if err := validateLauncherProcessIdentity(metadata); err != nil {
+		return workloadProcessInfo{}, err
+	}
+	info, err := containerWorkloadProcessInfo(containerDir, metadata)
+	if err != nil {
+		return workloadProcessInfo{}, err
+	}
+	if info.StartedAt == nil {
+		return workloadProcessInfo{}, errors.New("workload start time is unavailable; cannot safely validate the process")
+	}
+	if alive, err := processAlive(info.PID); err != nil {
+		return workloadProcessInfo{}, fmt.Errorf("check workload process %d: %w", info.PID, err)
+	} else if !alive {
+		return workloadProcessInfo{}, fmt.Errorf("workload process %d is no longer running", info.PID)
+	}
+	if err := validateProcessStartTime(info.PID, *info.StartedAt); err != nil {
+		return workloadProcessInfo{}, fmt.Errorf("validate workload process %d: %w", info.PID, err)
+	}
+	return info, nil
 }
 
 func trackedExecProcessTargets(containerDir string) ([]processSignalTarget, error) {
@@ -2780,7 +2899,7 @@ func trackedExecProcessTargets(containerDir string) ([]processSignalTarget, erro
 			return nil, fmt.Errorf("read exec PID file %s: %w", entry.Name(), err)
 		}
 		fields := strings.Fields(string(data))
-		if len(fields) != 2 && len(fields) != 3 {
+		if len(fields) < 2 || len(fields) > 4 {
 			continue
 		}
 		pid, pidErr := strconv.Atoi(fields[0])
@@ -2789,16 +2908,29 @@ func trackedExecProcessTargets(containerDir string) ([]processSignalTarget, erro
 			continue
 		}
 		processGroup := true
-		if len(fields) == 3 {
+		if len(fields) >= 3 {
 			groupValue, groupErr := strconv.Atoi(fields[2])
 			if groupErr != nil || (groupValue != 0 && groupValue != 1) {
 				continue
 			}
 			processGroup = groupValue == 1
 		}
+		var expectedStart *time.Time
+		if len(fields) == 4 {
+			startedAt, startErr := time.Parse(time.RFC3339Nano, fields[3])
+			if startErr != nil {
+				continue
+			}
+			expectedStart = &startedAt
+		}
 		parentPID, parentErr := processParentPID(pid)
 		if parentErr != nil || parentPID != ownerPID {
 			continue
+		}
+		if expectedStart != nil {
+			if startErr := validateProcessStartTime(pid, *expectedStart); startErr != nil {
+				continue
+			}
 		}
 		alive, aliveErr := processAlive(pid)
 		if aliveErr != nil {
@@ -2839,14 +2971,14 @@ func signalProcessTargets(targets []processSignalTarget, signal syscall.Signal) 
 }
 
 func signalContainerProcessGroups(containerDir string, metadata containerMetadata, signal syscall.Signal) error {
-	pid, pgid, err := containerWorkloadProcessInfo(containerDir, metadata)
+	info, err := containerWorkloadProcessInfo(containerDir, metadata)
 	if err != nil {
 		return fmt.Errorf("resolve workload process: %w", err)
 	}
-	if pid <= 0 {
+	if info.PID <= 0 {
 		return errors.New("workload process is not available")
 	}
-	targets := []processSignalTarget{{PID: pid, PGID: pgid, Group: pgid > 1}}
+	targets := []processSignalTarget{{PID: info.PID, PGID: info.PGID, Group: info.PGID > 1}}
 	execTargets, err := trackedExecProcessTargets(containerDir)
 	if err != nil {
 		return err

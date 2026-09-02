@@ -750,17 +750,23 @@ func TestPauseAndUnpausePreserveContainerState(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := process.Process.Pid
+	processStartedAt, err := processStartTime(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_ = process.Wait()
 	})
 	if err := writeContainerMetadata(containerDir, containerMetadata{
-		Name:         "demo",
-		Image:        "docker.io/library/demo:latest",
-		Network:      "external",
-		PID:          pid,
-		WorkloadPID:  pid,
-		WorkloadPGID: pid,
+		Name:              "demo",
+		Image:             "docker.io/library/demo:latest",
+		Network:           "external",
+		PID:               pid,
+		LauncherStartedAt: &processStartedAt,
+		WorkloadPID:       pid,
+		WorkloadPGID:      pid,
+		WorkloadStartedAt: &processStartedAt,
 		NetworkConfig: &networkConfig{
 			Interface: "lo0",
 			IP:        "127.0.0.1",
@@ -824,7 +830,7 @@ func TestPauseAndUnpausePreserveContainerState(t *testing.T) {
 	if err := json.Unmarshal(inspectionOutput, &inspection); err != nil {
 		t.Fatalf("inspect output %q: %v", inspectionOutput, err)
 	}
-	if inspection.Status != "paused" || inspection.WorkloadPID != pid || inspection.PausedAt == nil {
+	if inspection.Status != "paused" || inspection.WorkloadPID != pid || inspection.PausedAt == nil || inspection.WorkloadStartedAt == nil {
 		t.Fatalf("paused inspection = %#v", inspection)
 	}
 
@@ -862,6 +868,62 @@ func TestPauseAndUnpausePreserveContainerState(t *testing.T) {
 	}
 	if strings.HasPrefix(state, "T") {
 		t.Fatalf("process state after unpause = %q, still stopped", state)
+	}
+}
+
+func TestPauseRejectsMismatchedProcessStart(t *testing.T) {
+	home := t.TempDir()
+	containerDir := filepath.Join(home, "containers", "demo")
+	if err := os.MkdirAll(containerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	process := exec.Command("/bin/sh", "-c", "sleep 60")
+	process.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := process.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := process.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = process.Wait()
+	})
+	startedAt, err := processStartTime(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongStartedAt := startedAt.Add(-time.Minute)
+	if err := writeContainerMetadata(containerDir, containerMetadata{
+		Name:              "demo",
+		PID:               pid,
+		LauncherStartedAt: &wrongStartedAt,
+		WorkloadPID:       pid,
+		WorkloadPGID:      pid,
+		WorkloadStartedAt: &startedAt,
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MACKER_HOME", home)
+	if err := commandPause([]string{"demo"}); err == nil || !strings.Contains(err.Error(), "start time changed") {
+		t.Fatalf("pause error = %v, want start-time validation failure", err)
+	}
+	metadataBytes, err := os.ReadFile(filepath.Join(containerDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata containerMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.PausedAt != nil {
+		t.Fatal("failed pause persisted paused state")
+	}
+	state, err := processState(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(state, "T") {
+		t.Fatalf("process state after rejected pause = %q, want running", state)
 	}
 }
 

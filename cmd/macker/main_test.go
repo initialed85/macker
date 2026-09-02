@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -718,6 +720,14 @@ func TestContainerStatusPendingForegroundIsRunning(t *testing.T) {
 	if status != "running" {
 		t.Fatalf("pending container status = %q, want running", status)
 	}
+	pausedAt := time.Now().UTC()
+	status, err = containerStatus(containerMetadata{PausedAt: &pausedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "paused" {
+		t.Fatalf("paused container status = %q, want paused", status)
+	}
 	stoppedAt := time.Now().UTC()
 	status, err = containerStatus(containerMetadata{StoppedAt: &stoppedAt})
 	if err != nil {
@@ -726,6 +736,141 @@ func TestContainerStatusPendingForegroundIsRunning(t *testing.T) {
 	if status != "stopped" {
 		t.Fatalf("stopped container status = %q, want stopped", status)
 	}
+}
+
+func TestPauseAndUnpausePreserveContainerState(t *testing.T) {
+	home := t.TempDir()
+	containerDir := filepath.Join(home, "containers", "demo")
+	if err := os.MkdirAll(containerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	process := exec.Command("/bin/sh", "-c", "sleep 60")
+	process.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := process.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := process.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = process.Wait()
+	})
+	if err := writeContainerMetadata(containerDir, containerMetadata{
+		Name:         "demo",
+		Image:        "docker.io/library/demo:latest",
+		Network:      "external",
+		PID:          pid,
+		WorkloadPID:  pid,
+		WorkloadPGID: pid,
+		NetworkConfig: &networkConfig{
+			Interface: "lo0",
+			IP:        "127.0.0.1",
+		},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerContainerState(home, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MACKER_HOME", home)
+
+	if err := commandPause([]string{"demo"}); err != nil {
+		t.Fatal(err)
+	}
+	metadataBytes, err := os.ReadFile(filepath.Join(containerDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata containerMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.PausedAt == nil || metadata.NetworkConfig == nil {
+		t.Fatalf("paused metadata = %#v", metadata)
+	}
+	state, err := processState(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(state, "T") {
+		t.Fatalf("process state after pause = %q, want stopped", state)
+	}
+	status, err := containerStatus(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "paused" {
+		t.Fatalf("status after pause = %q", status)
+	}
+
+	originalStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	inspectErr := commandInspect([]string{"--json", "demo"})
+	_ = writer.Close()
+	os.Stdout = originalStdout
+	inspectionOutput, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if inspectErr != nil {
+		t.Fatal(inspectErr)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var inspection containerInspection
+	if err := json.Unmarshal(inspectionOutput, &inspection); err != nil {
+		t.Fatalf("inspect output %q: %v", inspectionOutput, err)
+	}
+	if inspection.Status != "paused" || inspection.WorkloadPID != pid || inspection.PausedAt == nil {
+		t.Fatalf("paused inspection = %#v", inspection)
+	}
+
+	if err := commandPS(nil); err != nil {
+		t.Fatal(err)
+	}
+	metadataBytes, err = os.ReadFile(filepath.Join(containerDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.PausedAt == nil || metadata.NetworkConfig == nil {
+		t.Fatalf("ps did not preserve paused resources: %#v", metadata)
+	}
+
+	if err := commandUnpause([]string{"demo"}); err != nil {
+		t.Fatal(err)
+	}
+	metadataBytes, err = os.ReadFile(filepath.Join(containerDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata = containerMetadata{}
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.PausedAt != nil || metadata.NetworkConfig == nil {
+		t.Fatalf("unpaused metadata = %#v", metadata)
+	}
+	state, err = processState(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(state, "T") {
+		t.Fatalf("process state after unpause = %q, still stopped", state)
+	}
+}
+
+func processState(pid int) (string, error) {
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "state=").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func TestContainerStateRoundTrip(t *testing.T) {

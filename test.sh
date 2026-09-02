@@ -296,6 +296,16 @@ STARTED=1
 echo '==> listing running containers'
 "$MACKER" ps
 
+echo '==> pausing and unpausing the running container'
+"$MACKER" pause "$CONTAINER"
+PAUSED_INSPECT=$("$MACKER" inspect --json "$CONTAINER")
+printf '%s\n' "$PAUSED_INSPECT" | grep -q '"status": "paused"'
+printf '%s\n' "$PAUSED_INSPECT" | grep -q '"paused_at": "'
+"$MACKER" ps | grep -Eq "^${CONTAINER}[[:space:]].*[[:space:]]paused[[:space:]]"
+"$MACKER" unpause "$CONTAINER"
+RUNNING_INSPECT=$("$MACKER" inspect --json "$CONTAINER")
+printf '%s\n' "$RUNNING_INSPECT" | grep -q '"status": "running"'
+
 echo '==> executing a command in the running container'
 "$MACKER" exec -it "$CONTAINER" -- /bin/sh -c 'printf macker-exec-ok:%s:%s\\n "$MACKER_TEST_ONE" "$MACKER_TEST_TWO"' > "$EXEC_OUTPUT" 2>/dev/null
 grep -q 'macker-exec-ok:one:two' "$EXEC_OUTPUT"

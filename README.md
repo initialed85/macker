@@ -255,6 +255,18 @@ environment or directory changes made by the entrypoint. `logs` reads the captur
 detached run; foreground runs do not create a log file. `-t` uses the caller's
 terminal rather than providing process or filesystem isolation.
 
+`pause` and `unpause` provide a non-destructive suspension lifecycle for
+detached workloads. `pause NAME` sends `SIGSTOP` to the workload process group
+(and tracked `exec` process groups), persists a `paused` status, and retains the
+rootfs, volumes, PF mappings, and network configuration. `unpause NAME` sends
+`SIGCONT` and clears that state. Paused containers remain visible in `ps` and
+`inspect`; `exec` is unavailable while paused. This is process-group control,
+not namespace or resource isolation, and workloads that daemonize into another
+session are outside Macker's process-group guarantee. `stop` remains the
+terminating/cleanup operation: if a container is paused, it is resumed before
+being terminated and its PF/network resources are removed. Exact command
+replay after a destructive stop is not part of this lifecycle yet.
+
 Use `inspect` to retrieve lifecycle and exit information. The machine-readable
 form is stable JSON and refreshes detached exit state from the persisted status
 record before printing:
@@ -264,18 +276,19 @@ record before printing:
 # `--json NAME` is an alias
 ```
 
-The JSON object includes `status` (`running`, `exited`, or `stopped`), the
-tracked launcher `pid`, the completed workload `workload_pid` when available,
-`exit_code` (including the conventional `128 + signal` value for signal
-termination), `started_at`, `finished_at`, `termination_signal`, and
-`termination_reason` (`exited`, `exited-with-error`, `signal`, or `stopped`).
-The object also includes `ports`, an array of `{host_port, node_port, protocol}`
-objects containing resolved mappings (including automatically allocated ports).
+The JSON object includes `status` (`running`, `paused`, `exited`, or `stopped`),
+the tracked launcher `pid`, the running or completed workload `workload_pid`
+when available, `exit_code` (including the conventional `128 + signal` value
+for signal termination), `started_at`, `finished_at`, `termination_signal`,
+`termination_reason` (`exited`, `exited-with-error`, `signal`, or `stopped`),
+and `paused_at` when the workload is suspended. The object also includes
+`ports`, an array of `{host_port, node_port, protocol}` objects containing
+resolved mappings (including automatically allocated ports).
 Detached `run` records this information when its OCI child exits; `inspect` and
 `ps` reconcile it into `metadata.json`.
 
-Use `macker rm --force NAME` to stop and remove a running container. `macker
-images` lists local images and `macker rmi IMAGE` removes an image layout;
+Use `macker rm --force NAME` to stop and remove a running or paused container.
+`macker images` lists local images and `macker rmi IMAGE` removes an image layout;
 removing an image does not remove existing container rootfs directories.
 Volumes are live symlinks to host paths, not kernel mounts. Host networking is
 shared, so wildcard listeners can collide on ports. `stop`, `rm`, foreground

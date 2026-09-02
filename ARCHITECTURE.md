@@ -26,7 +26,7 @@ flowchart LR
     CLI --> Build[macker build]
     CLI --> Registry[macker push / pull / bundle]
     CLI --> Run[macker run]
-    CLI --> Lifecycle[exec / logs / inspect / ps / stop / rm]
+    CLI --> Lifecycle[exec / logs / inspect / ps / pause / unpause / stop / rm]
 
     Build --> Parser[Mackerfile parser]
     Parser --> HostRun[Host /bin/bash RUN]
@@ -174,6 +174,23 @@ image entrypoint, command, or files; the high-level runtime allows the trusted
 host-command fallback so `/bin/sh`, an explicit entrypoint, or a
 volume-mounted executable can be used against the empty rootfs.
 
+### Pause and unpause
+
+Detached workloads can be suspended without tearing down their runtime
+resources. `macker pause NAME` sends `SIGSTOP` to the workload's process group
+and any tracked exec process groups, persists `PausedAt`, and leaves the
+materialized rootfs, volume links, PF mappings, and network configuration in
+place. `macker unpause NAME` sends `SIGCONT` and clears `PausedAt`. `ps` and
+`inspect` report `paused`, while reconciliation deliberately does not clean up
+paused resources. This is best-effort process-group control: a workload that
+creates a new session can escape the tracked group, and no namespace or
+resource-limit isolation is implied. `stop` remains separate and resumes a
+paused workload before terminating it and cleaning its PF/network resources.
+
+The pause path does not replay or reconstruct the original invocation. A
+future restart operation will need persisted command/entrypoint configuration
+and separate desired-network metadata.
+
 ## Networking and port publishing
 
 Macker has two network modes:
@@ -262,6 +279,7 @@ The default state root is `${MACKER_HOME:-$HOME/.macker}`:
 │       ├── rootfs/
 │       ├── metadata.json
 │       ├── exit.json
+│       ├── workload.pid         # while the native workload is running
 │       ├── run.log              # detached workloads
 │       └── exec/*.pid           # tracked detached exec children
 ├── state.json
@@ -280,8 +298,11 @@ Detached lifecycle behavior:
 stateDiagram-v2
     [*] --> Starting: run -d
     Starting --> Running: metadata + launcher started
+    Running --> Paused: pause / SIGSTOP process groups
+    Paused --> Running: unpause / SIGCONT process groups
     Running --> Exited: launcher/workload exits
     Running --> Stopped: stop / SIGTERM
+    Paused --> Stopped: stop resumes, then SIGTERM
     Exited --> Stopped: stop or cleanup observation
     Running --> Removed: rm --force / --rm
     Exited --> Removed: rm / ps with --rm
@@ -291,9 +312,12 @@ stateDiagram-v2
 
 The detached launcher writes an atomic `exit.json` record containing the
 workload PID, exit code, start/finish timestamps, signal, and termination
-reason. `inspect` and `ps` reconcile that record after confirming the launcher
-has exited. `inspect --format json NAME` reports the main workload as one
-machine-readable object, including resolved port mappings:
+reason. While running, the OCI child also writes `workload.pid`, allowing
+pause/unpause to target its dedicated process group; the file is removed when
+the workload exits. `inspect` and `ps` reconcile the exit record after
+confirming the launcher has exited. `inspect --format json NAME` reports the
+main workload as one machine-readable object, including resolved port mappings
+and `paused_at` when suspended:
 
 ```json
 {
@@ -315,8 +339,9 @@ machine-readable object, including resolved port mappings:
 
 A naturally exited detached workload reports `exited`; an explicit `stop`
 reports `stopped` and sets `pid` to zero while retaining historical workload
-and exit data. Foreground runs are persisted as stopped after completion, and
-`--rm` removes the record. Existing metadata created before exit records were
+and exit data. A paused workload retains its launcher/workload PIDs and all
+PF/network metadata; pause is not a cleanup or restart operation. Foreground
+runs are persisted as stopped after completion, and `--rm` removes the record. Existing metadata created before exit records were
 introduced may not have lifecycle timestamps or exit details.
 
 `exec` starts additional host processes from the existing rootfs and

@@ -121,11 +121,14 @@ type containerMetadata struct {
 	StartedAt         *time.Time     `json:"started_at,omitempty"`
 	FinishedAt        *time.Time     `json:"finished_at,omitempty"`
 	PID               int            `json:"pid,omitempty"`
+	WorkloadPID       int            `json:"workload_pid,omitempty"`
+	WorkloadPGID      int            `json:"workload_pgid,omitempty"`
 	ExitPID           int            `json:"exit_pid,omitempty"`
 	ExitCode          *int           `json:"exit_code,omitempty"`
 	TerminationSignal string         `json:"termination_signal,omitempty"`
 	TerminationReason string         `json:"termination_reason,omitempty"`
 	LogPath           string         `json:"log_path,omitempty"`
+	PausedAt          *time.Time     `json:"paused_at,omitempty"`
 	StoppedAt         *time.Time     `json:"stopped_at,omitempty"`
 }
 
@@ -157,6 +160,7 @@ type containerInspection struct {
 	FinishedAt        *time.Time    `json:"finished_at"`
 	TerminationSignal string        `json:"termination_signal"`
 	TerminationReason string        `json:"termination_reason"`
+	PausedAt          *time.Time    `json:"paused_at"`
 	Ports             []portMapping `json:"ports"`
 }
 
@@ -199,6 +203,10 @@ func main() {
 		err = commandInspect(os.Args[2:])
 	case "stop":
 		err = commandStop(os.Args[2:])
+	case "pause":
+		err = commandPause(os.Args[2:])
+	case "unpause":
+		err = commandUnpause(os.Args[2:])
 	case "ps":
 		err = commandPS(os.Args[2:])
 	case "rm":
@@ -235,6 +243,8 @@ Usage:
   macker logs [-f|--follow] NAME
   macker inspect [--format json|table] NAME
   macker stop NAME
+  macker pause NAME
+  macker unpause NAME
   macker rm [-f|--force] NAME
   macker ps [-a|--all]
   macker images
@@ -1184,7 +1194,8 @@ func commandRun(args []string) error {
 		StartedAt:     &startedAt,
 	}
 	exitPath := filepath.Join(containerDir, "exit.json")
-	ociRunArgs := []string{"--skip-unpack", "--rootfs", rootfs, "--status-file", exitPath}
+	workloadPIDPath := filepath.Join(containerDir, "workload.pid")
+	ociRunArgs := []string{"--skip-unpack", "--rootfs", rootfs, "--status-file", exitPath, "--pid-file", workloadPIDPath}
 	if scratch {
 		// Scratch has no command in its image config. Permit the normal host
 		// fallback so a default shell or an explicitly supplied command can
@@ -1225,6 +1236,10 @@ func commandRun(args []string) error {
 			return err
 		}
 		metadata.PID = pid
+		if workloadPID, workloadPGID, workloadErr := waitForWorkloadProcessInfo(workloadPIDPath, pid, 2*time.Second); workloadErr == nil {
+			metadata.WorkloadPID = workloadPID
+			metadata.WorkloadPGID = workloadPGID
+		}
 		if err := writeContainerMetadata(containerDir, metadata); err != nil {
 			_ = syscall.Kill(pid, syscall.SIGTERM)
 			return err
@@ -1259,6 +1274,8 @@ func commandRun(args []string) error {
 	pfInstalled = false
 	networkInstalled = false
 	metadata.PID = 0
+	metadata.WorkloadPID = 0
+	metadata.WorkloadPGID = 0
 	stoppedAt := time.Now().UTC()
 	metadata.StoppedAt = &stoppedAt
 	resourceCleanupErr := cleanupContainerResources(home, *name, &metadata)
@@ -1334,9 +1351,17 @@ func commandExec(args []string) error {
 	if err != nil {
 		return fmt.Errorf("parse container image: %w", err)
 	}
-	layout := imageLayoutPath(home, ref)
-	if err := requireLayout(layout); err != nil {
-		return fmt.Errorf("exec %s: %w", ref.Normalized, err)
+	var layout string
+	if isScratchImage(ref) {
+		layout, err = ensureScratchLayout(home)
+		if err != nil {
+			return err
+		}
+	} else {
+		layout = imageLayoutPath(home, ref)
+		if err := requireLayout(layout); err != nil {
+			return fmt.Errorf("exec %s: %w", ref.Normalized, err)
+		}
 	}
 
 	execDir := filepath.Join(containerDir, "exec")
@@ -1547,17 +1572,22 @@ func commandInspect(args []string) error {
 	if err != nil {
 		return fmt.Errorf("inspect container %q: %w", name, err)
 	}
+	workloadPID := metadata.WorkloadPID
+	if workloadPID == 0 {
+		workloadPID = metadata.ExitPID
+	}
 	inspection := containerInspection{
 		Name:              metadata.Name,
 		Image:             metadata.Image,
 		Status:            status,
 		PID:               metadata.PID,
-		WorkloadPID:       metadata.ExitPID,
+		WorkloadPID:       workloadPID,
 		ExitCode:          metadata.ExitCode,
 		StartedAt:         metadata.StartedAt,
 		FinishedAt:        metadata.FinishedAt,
 		TerminationSignal: metadata.TerminationSignal,
 		TerminationReason: metadata.TerminationReason,
+		PausedAt:          metadata.PausedAt,
 		Ports:             append([]portMapping{}, metadata.Ports...),
 	}
 	if *jsonOutput {
@@ -1586,6 +1616,7 @@ func commandInspect(args []string) error {
 		fmt.Printf("Finished: %s\\n", inspectionTime(inspection.FinishedAt))
 		fmt.Printf("Termination signal: %s\\n", valueOrDash(inspection.TerminationSignal))
 		fmt.Printf("Termination reason: %s\\n", valueOrDash(inspection.TerminationReason))
+		fmt.Printf("Paused: %s\\n", inspectionTime(inspection.PausedAt))
 		return nil
 	default:
 		return fmt.Errorf("unsupported inspect format %q; use table or json", *format)
@@ -1618,6 +1649,9 @@ func applyProcessExitInfo(metadata *containerMetadata, info processExitInfo) {
 	finishedAt := info.FinishedAt
 	metadata.StartedAt = &startedAt
 	metadata.FinishedAt = &finishedAt
+	metadata.WorkloadPID = 0
+	metadata.WorkloadPGID = 0
+	metadata.PausedAt = nil
 	metadata.ExitPID = info.PID
 	if info.ExitCode == nil {
 		metadata.ExitCode = nil
@@ -1670,6 +1704,12 @@ func commandStop(args []string) error {
 	}
 	if _, err := refreshContainerExitInfo(containerDir, &metadata); err != nil {
 		return fmt.Errorf("refresh container %q exit information: %w", name, err)
+	}
+	if metadata.PausedAt != nil {
+		if err := signalContainerProcessGroups(containerDir, metadata, syscall.SIGCONT); err != nil {
+			return fmt.Errorf("resume paused container %q before stopping: %w", name, err)
+		}
+		metadata.PausedAt = nil
 	}
 	if err := stopExecProcesses(containerDir); err != nil {
 		return err
@@ -1725,6 +1765,8 @@ func commandStop(args []string) error {
 		metadata.TerminationReason = "stopped"
 	}
 	metadata.PID = 0
+	metadata.WorkloadPID = 0
+	metadata.WorkloadPGID = 0
 	stoppedAt := time.Now().UTC()
 	metadata.StoppedAt = &stoppedAt
 	if err := writeContainerMetadata(containerDir, metadata); err != nil {
@@ -1740,6 +1782,136 @@ func commandStop(args []string) error {
 		}
 		fmt.Printf("removed container %s\n", name)
 	}
+	return nil
+}
+
+func commandPause(args []string) error {
+	if len(args) != 1 {
+		return errors.New("pause requires exactly one container name")
+	}
+	name := args[0]
+	if !validContainerName(name) {
+		return fmt.Errorf("invalid container name %q", name)
+	}
+	home, err := mackerHome()
+	if err != nil {
+		return err
+	}
+	containerDir := filepath.Join(home, "containers", name)
+	metadataPath := filepath.Join(containerDir, "metadata.json")
+	metadataBytes, err := os.ReadFile(metadataPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("container %q was not found", name)
+		}
+		return fmt.Errorf("read container metadata: %w", err)
+	}
+	var metadata containerMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		return fmt.Errorf("decode container metadata: %w", err)
+	}
+	if changed, err := refreshContainerExitInfo(containerDir, &metadata); err != nil {
+		return fmt.Errorf("refresh container %q exit information: %w", name, err)
+	} else if changed {
+		if err := writeContainerMetadata(containerDir, metadata); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	status, err := containerStatus(metadata)
+	if err != nil {
+		return fmt.Errorf("inspect container %q: %w", name, err)
+	}
+	if status != "running" {
+		return fmt.Errorf("container %q is %s, not running", name, status)
+	}
+	if metadata.PID <= 0 {
+		return fmt.Errorf("container %q is not a detached workload", name)
+	}
+	workloadPID, _, err := containerWorkloadProcessInfo(containerDir, metadata)
+	if err != nil {
+		return fmt.Errorf("pause container %q: %w", name, err)
+	}
+	alive, err := processAlive(workloadPID)
+	if err != nil {
+		return fmt.Errorf("check container %q workload: %w", name, err)
+	}
+	if !alive {
+		return fmt.Errorf("container %q workload is no longer running", name)
+	}
+	if err := signalContainerProcessGroups(containerDir, metadata, syscall.SIGSTOP); err != nil {
+		resumeErr := signalContainerProcessGroups(containerDir, metadata, syscall.SIGCONT)
+		return errors.Join(fmt.Errorf("pause container %q: %w", name, err), resumeErr)
+	}
+	pausedAt := time.Now().UTC()
+	metadata.PausedAt = &pausedAt
+	if err := writeContainerMetadata(containerDir, metadata); err != nil {
+		resumeErr := signalContainerProcessGroups(containerDir, metadata, syscall.SIGCONT)
+		return errors.Join(fmt.Errorf("persist paused container %q: %w", name, err), resumeErr)
+	}
+	fmt.Printf("paused container %s\n", name)
+	return nil
+}
+
+func commandUnpause(args []string) error {
+	if len(args) != 1 {
+		return errors.New("unpause requires exactly one container name")
+	}
+	name := args[0]
+	if !validContainerName(name) {
+		return fmt.Errorf("invalid container name %q", name)
+	}
+	home, err := mackerHome()
+	if err != nil {
+		return err
+	}
+	containerDir := filepath.Join(home, "containers", name)
+	metadataPath := filepath.Join(containerDir, "metadata.json")
+	metadataBytes, err := os.ReadFile(metadataPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("container %q was not found", name)
+		}
+		return fmt.Errorf("read container metadata: %w", err)
+	}
+	var metadata containerMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		return fmt.Errorf("decode container metadata: %w", err)
+	}
+	if changed, err := refreshContainerExitInfo(containerDir, &metadata); err != nil {
+		return fmt.Errorf("refresh container %q exit information: %w", name, err)
+	} else if changed {
+		if err := writeContainerMetadata(containerDir, metadata); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	status, err := containerStatus(metadata)
+	if err != nil {
+		return fmt.Errorf("inspect container %q: %w", name, err)
+	}
+	if status != "paused" {
+		return fmt.Errorf("container %q is %s, not paused", name, status)
+	}
+	workloadPID, _, err := containerWorkloadProcessInfo(containerDir, metadata)
+	if err != nil {
+		return fmt.Errorf("unpause container %q: %w", name, err)
+	}
+	alive, err := processAlive(workloadPID)
+	if err != nil {
+		return fmt.Errorf("check container %q workload: %w", name, err)
+	}
+	if !alive {
+		return fmt.Errorf("container %q workload is no longer running", name)
+	}
+	if err := signalContainerProcessGroups(containerDir, metadata, syscall.SIGCONT); err != nil {
+		pauseErr := signalContainerProcessGroups(containerDir, metadata, syscall.SIGSTOP)
+		return errors.Join(fmt.Errorf("unpause container %q: %w", name, err), pauseErr)
+	}
+	metadata.PausedAt = nil
+	if err := writeContainerMetadata(containerDir, metadata); err != nil {
+		pauseErr := signalContainerProcessGroups(containerDir, metadata, syscall.SIGSTOP)
+		return errors.Join(fmt.Errorf("persist unpaused container %q: %w", name, err), pauseErr)
+	}
+	fmt.Printf("unpaused container %s\n", name)
 	return nil
 }
 
@@ -1794,9 +1966,9 @@ func commandRM(args []string) error {
 	if err != nil {
 		return fmt.Errorf("inspect container %q: %w", name, err)
 	}
-	if status == "running" {
+	if status == "running" || status == "paused" {
 		if !*force {
-			return fmt.Errorf("container %q is running; stop it first or use rm --force", name)
+			return fmt.Errorf("container %q is %s; stop it first or use rm --force", name, status)
 		}
 		if err := commandStop([]string{name}); err != nil {
 			return err
@@ -1865,12 +2037,12 @@ func commandPS(args []string) error {
 			if err != nil {
 				return fmt.Errorf("inspect container %q: %w", name, err)
 			}
-			if status != "running" {
+			if status != "running" && status != "paused" {
 				if err := stopExecProcesses(filepath.Join(home, "containers", name)); err != nil {
 					return err
 				}
 			}
-			if status != "running" && (metadata.PFAnchor != "" || metadata.PFToken != "" || metadata.NetworkConfig != nil) {
+			if status != "running" && status != "paused" && (metadata.PFAnchor != "" || metadata.PFToken != "" || metadata.NetworkConfig != nil) {
 				if err := cleanupContainerResources(home, name, &metadata); err != nil {
 					return err
 				}
@@ -1885,13 +2057,13 @@ func commandPS(args []string) error {
 					return err
 				}
 			}
-			if metadata.AutoRemove && status != "running" {
+			if metadata.AutoRemove && status != "running" && status != "paused" {
 				if err := removeContainerFromState(state, home, name); err != nil {
 					return err
 				}
 				continue
 			}
-			if !*all && status != "running" {
+			if !*all && status != "running" && status != "paused" {
 				continue
 			}
 			pid := "-"
@@ -2048,6 +2220,9 @@ func containerStatus(metadata containerMetadata) (string, error) {
 			return "", err
 		}
 		if alive {
+			if metadata.PausedAt != nil {
+				return "paused", nil
+			}
 			return "running", nil
 		}
 		return "exited", nil
@@ -2057,6 +2232,9 @@ func containerStatus(metadata containerMetadata) (string, error) {
 	}
 	if metadata.FinishedAt != nil {
 		return "exited", nil
+	}
+	if metadata.PausedAt != nil {
+		return "paused", nil
 	}
 	return "running", nil
 }
@@ -2512,6 +2690,169 @@ func runDetached(binary string, args []string, logPath string) (int, error) {
 		return 0, fmt.Errorf("release detached workload: %w", err)
 	}
 	return pid, nil
+}
+
+type processSignalTarget struct {
+	PID   int
+	PGID  int
+	Group bool
+}
+
+func readWorkloadProcessInfo(path string, ownerPID int) (pid, pgid int, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 && len(fields) != 3 {
+		return 0, 0, fmt.Errorf("invalid workload PID file %q", path)
+	}
+	pid, err = strconv.Atoi(fields[0])
+	if err != nil || pid <= 0 {
+		return 0, 0, fmt.Errorf("invalid workload PID in %q", path)
+	}
+	fileOwner, err := strconv.Atoi(fields[1])
+	if err != nil || fileOwner <= 0 {
+		return 0, 0, fmt.Errorf("invalid workload PID owner in %q", path)
+	}
+	if ownerPID > 0 && fileOwner != ownerPID {
+		return 0, 0, fmt.Errorf("workload PID file %q belongs to launcher %d, not %d", path, fileOwner, ownerPID)
+	}
+	processGroup := true
+	if len(fields) == 3 {
+		value, parseErr := strconv.Atoi(fields[2])
+		if parseErr != nil || (value != 0 && value != 1) {
+			return 0, 0, fmt.Errorf("invalid workload process-group flag in %q", path)
+		}
+		processGroup = value == 1
+	}
+	if processGroup {
+		return pid, pid, nil
+	}
+	return pid, 0, nil
+}
+
+func waitForWorkloadProcessInfo(path string, ownerPID int, timeout time.Duration) (pid, pgid int, err error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		pid, pgid, err = readWorkloadProcessInfo(path, ownerPID)
+		if err == nil {
+			return pid, pgid, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return 0, 0, lastErr
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func containerWorkloadProcessInfo(containerDir string, metadata containerMetadata) (pid, pgid int, err error) {
+	if metadata.WorkloadPID > 0 {
+		pgid = metadata.WorkloadPGID
+		if pgid == 0 {
+			pgid = metadata.WorkloadPID
+		}
+		return metadata.WorkloadPID, pgid, nil
+	}
+	return readWorkloadProcessInfo(filepath.Join(containerDir, "workload.pid"), metadata.PID)
+}
+
+func trackedExecProcessTargets(containerDir string) ([]processSignalTarget, error) {
+	entries, err := os.ReadDir(filepath.Join(containerDir, "exec"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read exec processes: %w", err)
+	}
+	targets := make([]processSignalTarget, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pid") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(containerDir, "exec", entry.Name()))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read exec PID file %s: %w", entry.Name(), err)
+		}
+		fields := strings.Fields(string(data))
+		if len(fields) != 2 && len(fields) != 3 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		ownerPID, ownerErr := strconv.Atoi(fields[1])
+		if pidErr != nil || ownerErr != nil || pid <= 0 || ownerPID <= 0 {
+			continue
+		}
+		processGroup := true
+		if len(fields) == 3 {
+			groupValue, groupErr := strconv.Atoi(fields[2])
+			if groupErr != nil || (groupValue != 0 && groupValue != 1) {
+				continue
+			}
+			processGroup = groupValue == 1
+		}
+		parentPID, parentErr := processParentPID(pid)
+		if parentErr != nil || parentPID != ownerPID {
+			continue
+		}
+		alive, aliveErr := processAlive(pid)
+		if aliveErr != nil {
+			return nil, fmt.Errorf("check exec process %d: %w", pid, aliveErr)
+		}
+		if !alive {
+			continue
+		}
+		target := processSignalTarget{PID: pid, Group: processGroup}
+		if processGroup {
+			target.PGID = pid
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+func signalProcessTargets(targets []processSignalTarget, signal syscall.Signal) error {
+	var signalErrors []error
+	for _, target := range targets {
+		alive, err := processAlive(target.PID)
+		if err != nil {
+			signalErrors = append(signalErrors, fmt.Errorf("check process %d: %w", target.PID, err))
+			continue
+		}
+		if !alive {
+			continue
+		}
+		signalPID := target.PID
+		if target.Group && target.PGID > 1 {
+			signalPID = -target.PGID
+		}
+		if err := syscall.Kill(signalPID, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+			signalErrors = append(signalErrors, fmt.Errorf("signal process %d: %w", target.PID, err))
+		}
+	}
+	return errors.Join(signalErrors...)
+}
+
+func signalContainerProcessGroups(containerDir string, metadata containerMetadata, signal syscall.Signal) error {
+	pid, pgid, err := containerWorkloadProcessInfo(containerDir, metadata)
+	if err != nil {
+		return fmt.Errorf("resolve workload process: %w", err)
+	}
+	if pid <= 0 {
+		return errors.New("workload process is not available")
+	}
+	targets := []processSignalTarget{{PID: pid, PGID: pgid, Group: pgid > 1}}
+	execTargets, err := trackedExecProcessTargets(containerDir)
+	if err != nil {
+		return err
+	}
+	targets = append(targets, execTargets...)
+	return signalProcessTargets(targets, signal)
 }
 
 func processAlive(pid int) (bool, error) {

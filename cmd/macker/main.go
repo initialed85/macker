@@ -445,8 +445,9 @@ func commandPull(args []string) error {
 }
 
 // commandBundle combines all platform manifests from SOURCE with the local
-// darwin/arm64 image stored under DARWIN-IMAGE. The Darwin image reference is
-// also the output reference; the merged image is pushed there by default.
+// Darwin image matching the host architecture stored under DARWIN-IMAGE. The
+// Darwin image reference is also the output reference; the merged image is
+// pushed there by default.
 func commandBundle(args []string) error {
 	fs := flag.NewFlagSet("bundle", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -574,7 +575,7 @@ func mergeBundleLayouts(source, darwin, output, tag string) error {
 		return fmt.Errorf("find Darwin manifests: %w", err)
 	}
 	if len(darwinDescriptors) == 0 {
-		return errors.New("local Darwin image contains no darwin/arm64 manifest")
+		return fmt.Errorf("local Darwin image contains no darwin/%s manifest", runtime.GOARCH)
 	}
 
 	if err := os.MkdirAll(filepath.Join(output, "blobs", "sha256"), 0o755); err != nil {
@@ -632,9 +633,9 @@ func mergeBundleIndices(source bundleIndex, darwinDescriptors []bundleDescriptor
 		}
 		if known {
 			descriptor.Platform = &platform
-			if platform.OS == "darwin" && platform.Architecture == "arm64" {
+			if platform.OS == "darwin" && platform.Architecture == runtime.GOARCH {
 				// The explicitly supplied local Darwin image wins over an old
-				// darwin/arm64 entry in the source image.
+				// entry for the host Darwin architecture in the source image.
 				continue
 			}
 		}
@@ -797,7 +798,7 @@ func collectDarwinDescriptors(layout string, index bundleIndex) ([]bundleDescrip
 	}
 	var result []bundleDescriptor
 	for _, descriptor := range flattened {
-		if descriptor.Platform != nil && descriptor.Platform.OS == "darwin" && descriptor.Platform.Architecture == "arm64" {
+		if descriptor.Platform != nil && descriptor.Platform.OS == "darwin" && descriptor.Platform.Architecture == runtime.GOARCH {
 			result = append(result, descriptor)
 		}
 	}
@@ -2661,21 +2662,21 @@ func buildEnvironment(imageEnv []string, contextDir, rootfs string) []string {
 	imageValues := make(map[string]string, len(imageEnv))
 	for _, entry := range imageEnv {
 		key, _, ok := strings.Cut(entry, "=")
-		if ok && key != "" && key != "MACKER_CONTEXT" && key != "MACKER_ROOTFS" {
+		if ok && key != "" && key != "MACKER_CONTEXT" && key != "MACKER_ROOTFS" && key != "MACKER_GOARCH" {
 			imageValues[key] = entry
 		}
 	}
 	env := make([]string, 0, len(os.Environ())+len(imageValues)+2)
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
-		if !ok || (key != "MACKER_CONTEXT" && key != "MACKER_ROOTFS" && imageValues[key] == "") {
+		if !ok || (key != "MACKER_CONTEXT" && key != "MACKER_ROOTFS" && key != "MACKER_GOARCH" && imageValues[key] == "") {
 			env = append(env, entry)
 		}
 	}
 	for _, entry := range imageValues {
 		env = append(env, entry)
 	}
-	env = append(env, "MACKER_CONTEXT="+contextDir, "MACKER_ROOTFS="+rootfs)
+	env = append(env, "MACKER_CONTEXT="+contextDir, "MACKER_ROOTFS="+rootfs, "MACKER_GOARCH="+runtime.GOARCH)
 	return env
 }
 

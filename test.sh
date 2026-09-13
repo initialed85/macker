@@ -9,6 +9,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$SCRIPT_DIR"
 
 MACKER=${MACKER:-./bin/macker}
+DARWIN_ARCH=${DARWIN_ARCH:-$(go env GOARCH)}
 TEST_ID=${TEST_ID:-macker-test-$(date +%Y%m%d%H%M%S)-$$}
 SIMPLE_IMAGE=${SIMPLE_IMAGE:-initialed85/macker-test-hello:$TEST_ID}
 SIMPLE_AMD64_IMAGE=${SIMPLE_AMD64_IMAGE:-initialed85/macker-test-hello:${TEST_ID}-amd64}
@@ -211,7 +212,7 @@ if [ "$SKIP_DISTRIBUTION" -eq 0 ]; then
 
     echo "==> bundling Darwin simple workload into $SIMPLE_IMAGE"
     "$MACKER" bundle "$SIMPLE_SOURCE_IMAGE" "$SIMPLE_IMAGE"
-    assert_platforms "$SIMPLE_IMAGE" linux amd64 linux arm64 darwin arm64
+    assert_platforms "$SIMPLE_IMAGE" linux amd64 linux arm64 darwin "$DARWIN_ARCH"
 
     echo '==> running the bundled Linux simple workload on amd64'
     docker run --pull=always --rm --platform=linux/amd64 "$SIMPLE_IMAGE"
@@ -230,7 +231,7 @@ if [ "$SKIP_DISTRIBUTION" -eq 0 ]; then
 
     echo "==> bundling Darwin nginx workload into $NGINX_IMAGE"
     "$MACKER" bundle "$NGINX_SOURCE_IMAGE" "$NGINX_IMAGE"
-    assert_platforms "$NGINX_IMAGE" linux amd64 linux arm64 darwin arm64
+    assert_platforms "$NGINX_IMAGE" linux amd64 linux arm64 darwin "$DARWIN_ARCH"
 
     echo '==> validating bundled Linux nginx on amd64'
     docker run --pull=always --rm --platform=linux/amd64 "$NGINX_IMAGE" nginx -t

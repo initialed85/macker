@@ -10,13 +10,20 @@ on:
 permissions:
   contents: write
 
-env:
-  GO_VERSION: '1.26.5'
-
 jobs:
   build:
-    name: Build darwin/arm64
+    name: Build darwin/${{ matrix.arch }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Go 1.22 is the last Go release whose Darwin binaries run on
+          # macOS Catalina; use it for the Intel artifact.
+          - arch: amd64
+            go-version: '1.22.12'
+          - arch: arm64
+            go-version: '1.26.5'
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -24,7 +31,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: ${{ matrix.go-version }}
           cache: true
 
       - name: Check source
@@ -33,29 +40,37 @@ jobs:
           go vet ./...
           sh -n test.sh
           sh -n example/nginx/build-rootfs.sh
+          sh -n example/echo-server/build.sh
 
-      - name: Build Darwin arm64 binary
+      - name: Cross-compile Darwin tests
         env:
           GOOS: darwin
-          GOARCH: arm64
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: go test -c -o /tmp/macker-${{ matrix.arch }}.test ./cmd/macker
+
+      - name: Build Darwin binary
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: '0'
         run: |
-          mkdir -p dist/macker-darwin-arm64
-          go build -o dist/macker-darwin-arm64/macker ./cmd/macker
-          file dist/macker-darwin-arm64/macker
+          mkdir -p dist/macker-darwin-${{ matrix.arch }}
+          go build -o dist/macker-darwin-${{ matrix.arch }}/macker ./cmd/macker
+          file dist/macker-darwin-${{ matrix.arch }}/macker
 
       - name: Package binaries
         run: |
-          tar -C dist -czf macker-darwin-arm64.tar.gz macker-darwin-arm64
-          sha256sum macker-darwin-arm64.tar.gz > macker-darwin-arm64.tar.gz.sha256
+          tar -C dist -czf macker-darwin-${{ matrix.arch }}.tar.gz macker-darwin-${{ matrix.arch }}
+          sha256sum macker-darwin-${{ matrix.arch }}.tar.gz > macker-darwin-${{ matrix.arch }}.tar.gz.sha256
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macker-darwin-arm64
+          name: macker-darwin-${{ matrix.arch }}
           path: |
-            macker-darwin-arm64.tar.gz
-            macker-darwin-arm64.tar.gz.sha256
+            macker-darwin-${{ matrix.arch }}.tar.gz
+            macker-darwin-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
 
   release:
@@ -68,7 +83,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: macker-darwin-arm64
+          pattern: macker-darwin-*
           merge-multiple: true
 
       - name: Create release

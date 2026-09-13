@@ -1,8 +1,9 @@
 # Macker
 
 Macker is an experimental OCI workload tool for native macOS executables on
-Apple Silicon. It packages Mach-O programs as `darwin/arm64` OCI images and
-runs them as ordinary host processes.
+Apple Silicon and Intel Macs. It packages Mach-O programs as a native
+`darwin/arm64` or `darwin/amd64` OCI image and runs them as ordinary host
+processes.
 
 Macker is **not** a Linux container runtime. It provides no process,
 filesystem, network, or resource isolation. Treat images and `RUN` commands as
@@ -17,8 +18,9 @@ possible alongside Linux nodes in the K3s cluster.
 
 ## Requirements
 
-- Apple Silicon macOS for building and running Darwin workloads
-- Go 1.22+
+- macOS on Apple Silicon or Intel for building and running Darwin workloads
+- Go 1.22+ (Go 1.22 is the last Go release whose binaries run on macOS Catalina)
+  when Catalina compatibility is required
 - `ifconfig` and `pfctl` (included with macOS) plus root or passwordless `sudo` for Darwin network setup
 - [Skopeo](https://github.com/containers/skopeo) for registry operations
 - Homebrew and its `nginx`, `pcre2`, `openssl@3`, and `ca-certificates` packages
@@ -68,10 +70,11 @@ must be absolute paths; runtime `run --entrypoint COMMAND` may instead select a
 command by the image's `PATH`.
 
 `RUN` executes `/bin/bash -c` on the host with the build context as its working
-directory. It receives `MACKER_CONTEXT`, `MACKER_ROOTFS`, the host environment,
-and Mackerfile `ENV` values, and can read or modify the host as the invoking
-user. `RUN` and `COPY` steps mutate one temporary rootfs in order; they do not
-create separate cached layers. The final image contains one uncompressed tar
+directory. It receives `MACKER_CONTEXT`, `MACKER_ROOTFS`, the target
+`MACKER_GOARCH` (`arm64` or `amd64`), the host environment, and Mackerfile
+`ENV` values, and can read or modify the host as the invoking user. `RUN` and
+`COPY` steps mutate one temporary rootfs in order; they do not create separate
+cached layers. The final image contains one uncompressed tar
 layer.
 
 `COPY` sources are relative to the build context and cannot escape it;
@@ -112,15 +115,17 @@ Push or pull a Darwin image:
 ./bin/macker pull initialed85/nginx-darwin:latest
 ```
 
-`pull` selects the native `darwin/arm64` manifest from a multi-platform image
-and installs it locally. Registry image references must be tagged; Docker Hub
-is assumed when no registry is specified. The local `scratch` sentinel is the
+`pull` selects the native Darwin manifest matching the host architecture
+(`darwin/arm64` on Apple Silicon or `darwin/amd64` on Intel) from a
+multi-platform image and installs it locally. Registry image references must be
+tagged; Docker Hub is assumed when no registry is specified. The local `scratch` sentinel is the
 exception and may be written as either `scratch` or `scratch:latest`.
 
 `bundle` combines a source image with a locally stored Darwin image. A source
 is read from local storage when present, otherwise pulled from its registry.
-Source platforms are preserved, any existing `darwin/arm64` entry is replaced,
-and the result is pushed to the Darwin image reference by default:
+Source platforms are preserved, and any existing Darwin entry matching the
+host architecture is replaced. The result is pushed to the Darwin image
+reference by default:
 
 ```sh
 ./bin/macker bundle nginx:latest initialed85/nginx-darwin:latest
@@ -300,7 +305,8 @@ externally is cleaned up the next time it is observed by Macker.
 
 ## Examples and tests
 
-The hello Mackerfile builds a `CGO_ENABLED=0` Darwin/arm64 Go executable. The
+The hello Mackerfile builds a `CGO_ENABLED=0` native Darwin Go executable
+(the host architecture is selected automatically). The
 nginx Mackerfile uses host-side `RUN` commands to look up Homebrew, assemble a
 rootfs, relocate application dylibs, and ad-hoc sign the copied Mach-O files:
 
@@ -318,8 +324,10 @@ requires an image that contains a shell (or a suitable host volume).
 
 The Echo-Server example builds the upstream [Ealenn/Echo-Server](https://github.com/Ealenn/Echo-Server)
 `0.9.2` release into a native Darwin image. Its pinned build downloads the
-official Node `22.23.2` arm64 Darwin runtime, runs the upstream webpack build,
-and packages the resulting bundle plus `global.json`:
+architecture-appropriate official Darwin Node runtime, runs the upstream
+webpack build, and packages the resulting bundle plus `global.json`. Apple
+Silicon uses Node `22.23.2`; Intel uses Node `20.19.5`, whose binary supports
+macOS Catalina:
 
 ```sh
 make echo-server
@@ -340,9 +348,11 @@ skopeo login docker.io
 make echo-server-bundle
 ```
 
-The example build runs on Apple Silicon macOS and needs network access to
-GitHub and nodejs.org. As with all Macker workloads, this is a trusted native
-process rather than an isolated macOS container.
+The example build runs on macOS and needs network access to GitHub and
+nodejs.org. The Intel artifact is intended for Catalina or newer; Homebrew
+must provide Intel-compatible nginx dependencies for the nginx example. As
+with all Macker workloads, this is a trusted native process rather than an
+isolated macOS container.
 
 For the direct OCI hello experiment, use the `macker oci` subcommands:
 
@@ -392,9 +402,10 @@ and `READY_TIMEOUT`.
 ## CI and releases
 
 `.github/workflows/release.yml` runs tests, vet, shell syntax checks, and a
-Darwin/arm64 cross-build of the `macker` binary. It uploads a tarball and
-SHA-256 checksum, and creates a GitHub release for pushes to `master` and
-manual runs.
+Darwin/arm64 and Darwin/amd64 cross-builds of the `macker` binary. The
+Darwin/amd64 release is built with Go 1.22.12 so it remains compatible with
+macOS Catalina; both artifacts include a tarball and SHA-256 checksum. A
+GitHub release is created for pushes to `master` and manual runs.
 Pull requests run the checks and build but do not create releases.
 
 ## Deliberate limitations
@@ -411,5 +422,7 @@ Pull requests run the checks and build but do not create releases.
   local builder.
 - File ownership, xattrs, devices, FIFOs, and extended ACLs are not fully
   preserved.
-- The tested Macker builder and runtime target Darwin/arm64; `bundle` can retain
-  other platform manifests supplied by a source image.
+- Native runtime support targets Darwin/arm64 and Darwin/amd64. The Darwin/amd64
+  release requires a Catalina-compatible Go build and architecture-compatible
+  native dependencies; `bundle` retains other platform manifests supplied by a
+  source image.

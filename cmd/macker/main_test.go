@@ -17,6 +17,26 @@ import (
 	"time"
 )
 
+func TestBuildEnvironmentSetsTargetArchitecture(t *testing.T) {
+	env := buildEnvironment([]string{"MACKER_GOARCH=wrong", "BUILD_VALUE=image"}, "/context", "/rootfs")
+	values := make(map[string]string)
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	if values["MACKER_CONTEXT"] != "/context" || values["MACKER_ROOTFS"] != "/rootfs" {
+		t.Fatalf("build paths = %#v", values)
+	}
+	if values["MACKER_GOARCH"] != runtime.GOARCH {
+		t.Fatalf("MACKER_GOARCH = %q, want %q", values["MACKER_GOARCH"], runtime.GOARCH)
+	}
+	if values["BUILD_VALUE"] != "image" {
+		t.Fatalf("image build value = %q", values["BUILD_VALUE"])
+	}
+}
+
 func TestParseImageRefDefaultsDockerHub(t *testing.T) {
 	ref, err := parseImageRef("initialed85/nginx-darwin:latest")
 	if err != nil {
@@ -381,28 +401,34 @@ func TestResolveNodePorts(t *testing.T) {
 	}
 }
 
-func TestMergeBundleIndicesReplacesDarwinManifest(t *testing.T) {
+func TestMergeBundleIndicesReplacesHostDarwinManifest(t *testing.T) {
 	linux := testBundleDigest("linux")
 	oldDarwin := testBundleDigest("old-darwin")
+	otherDarwin := testBundleDigest("other-darwin")
 	newDarwin := testBundleDigest("new-darwin")
+	otherArch := "arm64"
+	if runtime.GOARCH == otherArch {
+		otherArch = "amd64"
+	}
 	source := bundleIndex{
 		SchemaVersion: 2,
 		Manifests: []bundleDescriptor{
 			{Digest: linux, Platform: &bundlePlatform{OS: "linux", Architecture: "arm64"}},
-			{Digest: oldDarwin, Platform: &bundlePlatform{OS: "darwin", Architecture: "arm64"}},
+			{Digest: oldDarwin, Platform: &bundlePlatform{OS: "darwin", Architecture: runtime.GOARCH}},
+			{Digest: otherDarwin, Platform: &bundlePlatform{OS: "darwin", Architecture: otherArch}},
 		},
 	}
 	merged, err := mergeBundleIndices(source, []bundleDescriptor{{
 		Digest:   newDarwin,
-		Platform: &bundlePlatform{OS: "darwin", Architecture: "arm64"},
+		Platform: &bundlePlatform{OS: "darwin", Architecture: runtime.GOARCH},
 	}}, t.TempDir(), "latest")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(merged.Manifests) != 2 {
+	if len(merged.Manifests) != 3 {
 		t.Fatalf("merged manifests = %#v", merged.Manifests)
 	}
-	if merged.Manifests[0].Digest != linux || merged.Manifests[1].Digest != newDarwin {
+	if merged.Manifests[0].Digest != linux || merged.Manifests[1].Digest != otherDarwin || merged.Manifests[2].Digest != newDarwin {
 		t.Fatalf("merged manifests = %#v", merged.Manifests)
 	}
 	if _, ok := merged.Manifests[0].Annotations["org.opencontainers.image.ref.name"]; !ok {
@@ -432,7 +458,7 @@ func TestMergeBundleLayoutsCopiesAndSelectsDarwin(t *testing.T) {
 		Manifests: []bundleDescriptor{{
 			Digest:   darwinBlob,
 			Size:     int64(len("darwin manifest")),
-			Platform: &bundlePlatform{OS: "darwin", Architecture: "arm64"},
+			Platform: &bundlePlatform{OS: "darwin", Architecture: runtime.GOARCH},
 		}},
 	})
 

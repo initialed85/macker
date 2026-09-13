@@ -5,10 +5,26 @@
 set -eu
 
 output=${1:?usage: build.sh ROOTFS}
-node_version=22.23.2
-node_archive="node-v${node_version}-darwin-arm64.tar.gz"
+# Node 22's Darwin binaries require macOS 11. Use the latest Node 20
+# distribution for Intel so the resulting image remains runnable on Catalina.
+case "${NODE_ARCH:-$(uname -m)}" in
+    arm64|aarch64)
+        node_arch=arm64
+        node_version=22.23.2
+        node_sha256=61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6
+        ;;
+    x86_64|amd64)
+        node_arch=x64
+        node_version=20.19.5
+        node_sha256=f9cff058f2766d4d0631dc69b5f7f27664b3a42ff186e25ac7e1ac269af7e696
+        ;;
+    *)
+        echo "unsupported Darwin architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+esac
+node_archive="node-v${node_version}-darwin-${node_arch}.tar.gz"
 node_url="https://nodejs.org/dist/v${node_version}/${node_archive}"
-node_sha256=61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6
 echo_version=0.9.2
 echo_archive="echo-server-${echo_version}.tar.gz"
 echo_url="https://github.com/Ealenn/Echo-Server/archive/refs/tags/${echo_version}.tar.gz"
@@ -20,7 +36,7 @@ trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "$node_url" -o "$tmp/$node_archive"
 printf '%s  %s\n' "$node_sha256" "$tmp/$node_archive" | shasum -a 256 -c - >/dev/null
 tar -xzf "$tmp/$node_archive" -C "$tmp"
-node_prefix="$tmp/node-v${node_version}-darwin-arm64"
+node_prefix="$tmp/node-v${node_version}-darwin-${node_arch}"
 
 curl -fsSL "$echo_url" -o "$tmp/$echo_archive"
 printf '%s  %s\n' "$echo_sha256" "$tmp/$echo_archive" | shasum -a 256 -c - >/dev/null
@@ -28,7 +44,9 @@ mkdir "$tmp/source"
 tar -xzf "$tmp/$echo_archive" --strip-components=1 -C "$tmp/source"
 
 # Use the pinned official Node distribution for the build as well as runtime;
-# npm ci and webpack produce one self-contained application bundle.
+# npm ci and webpack produce one self-contained application bundle. The
+# architecture-specific Node version keeps the Intel image compatible with
+# Catalina while retaining Node 22 on Apple Silicon.
 PATH="$node_prefix/bin:/usr/bin:/bin"
 export PATH
 cd "$tmp/source"

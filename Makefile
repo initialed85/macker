@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-DARWIN_ARCH ?= arm64
+DARWIN_ARCH ?= $(shell go env GOARCH)
 MACKER := bin/macker
 ROOTFS := example/rootfs
 IMAGE := example/image
@@ -34,6 +34,7 @@ image: build hello
 		--rootfs $(ROOTFS) \
 		--output $(IMAGE) \
 		--tag hello-darwin:latest \
+		--architecture $(DARWIN_ARCH) \
 		--entrypoint /app/hello \
 		--env PATH=/usr/local/bin:/usr/bin:/bin \
 		--workdir /
@@ -47,6 +48,7 @@ nginx: build nginx-rootfs
 		--rootfs $(NGINX_ROOTFS) \
 		--output $(NGINX_IMAGE) \
 		--tag nginx-darwin:latest \
+		--architecture $(DARWIN_ARCH) \
 		--entrypoint /usr/local/bin/nginx \
 		--arg=-p \
 		--arg=./ \

@@ -1,8 +1,9 @@
 FROM scratch
 
 # Echo-Server is bundled by upstream webpack; this downloads the pinned
-# release, builds it with the official arm64 Darwin Node distribution, and
-# copies only the native Node runtime plus the application bundle.
+# release, builds it with an architecture-appropriate official Darwin Node
+# distribution, and copies only the native Node runtime plus the application
+# bundle. Intel builds use Node 20 so they remain compatible with Catalina.
 RUN sh "$MACKER_CONTEXT/example/echo-server/build.sh" "$MACKER_ROOTFS"
 
 ENV PATH=/usr/local/bin:/usr/bin:/bin

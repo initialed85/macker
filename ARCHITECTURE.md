@@ -1,9 +1,9 @@
 # Macker architecture
 
 Macker is an experimental OCI workload tool for running native macOS
-Mach-O programs on Apple Silicon. It uses OCI images as a distribution and
-packaging format, but it is **not** a Linux container runtime and does not
-provide a security boundary.
+Mach-O programs on Apple Silicon and Intel Macs. It uses OCI images as a
+distribution and packaging format, but it is **not** a Linux container runtime
+and does not provide a security boundary.
 
 Macker's product boundary is deliberately small:
 
@@ -101,9 +101,10 @@ A Mackerfile is intentionally Dockerfile-like but supports only a small subset:
 
 Build steps are applied in order to one temporary rootfs. `RUN` executes
 `/bin/bash -c` on the host, using the build context as its working directory.
-It receives `MACKER_CONTEXT`, `MACKER_ROOTFS`, the host environment, and image
-build environment values. It can therefore read or modify anything available to
-the invoking user and must be treated as trusted build code.
+It receives `MACKER_CONTEXT`, `MACKER_ROOTFS`, the target `MACKER_GOARCH`
+(`arm64` or `amd64`), the host environment, and image build environment
+values. It can therefore read or modify anything available to the invoking user
+and must be treated as trusted build code.
 
 `COPY` sources are constrained to the build context, while destinations must be
 absolute paths in the image rootfs. The resulting image currently contains one
@@ -119,11 +120,12 @@ uses Skopeo for registry authentication and transfer, so credentials come from
 Skopeo's normal credential stores (with `REGISTRY_AUTH_FILE` available as an
 override).
 
-`pull` selects the native `darwin/arm64` manifest from a multi-platform image.
-`bundle` recursively flattens source indexes, preserves their non-Darwin
-platform descriptors, replaces any existing Darwin/arm64 descriptor, and can
-push the merged index. Platform-specific entrypoints, arguments, environments,
-and behavior are not reconciled by bundling.
+`pull` selects the native Darwin manifest matching the host architecture from a
+multi-platform image. `bundle` recursively flattens source indexes, preserves
+their non-Darwin platform descriptors, replaces any existing Darwin descriptor
+matching the host architecture, and can push the merged index. Platform-
+specific entrypoints, arguments, environments, and behavior are not reconciled
+by bundling.
 
 The local OCI loader verifies referenced blob sizes and SHA-256 digests before
 using descriptor JSON. Low-level OCI commands accept layout directories rather
@@ -159,8 +161,9 @@ filesystem and does not provide copy-on-write isolation.
 
 ### Native execution
 
-`macker oci run` loads the image config, selects the Darwin/arm64 workload,
-resolves its entrypoint and arguments, sets the configured environment and
+`macker oci run` loads the image config, selects the Darwin workload matching
+the host architecture (`darwin/arm64` or `darwin/amd64`), resolves its
+entrypoint and arguments, sets the configured environment and
 working directory, and launches the native Mach-O command. Non-chroot mode
 runs from the extracted rootfs directory while retaining the host's process,
 filesystem, and network view. An explicit runtime entrypoint may use a host
@@ -411,10 +414,10 @@ cmd/macker/main.go          CLI, metadata, state, lifecycle, PF orchestration
 cmd/macker/oci.go           OCI layouts, unpack, command execution, exit records
 cmd/macker/network.go       Darwin network setup and cleanup
 cmd/macker/ports.go         automatic NodePort allocation
-example/hello/              minimal Darwin/arm64 workload
+example/hello/              minimal native Darwin workload
 example/nginx/              native Homebrew nginx image
 example/echo-server/        native Node/Echo-Server image
-.github/workflows/          Darwin/arm64 CI and release packaging
+.github/workflows/          Darwin/arm64 and Darwin/amd64 CI/release packaging
 ```
 
 The normal checks are:
@@ -423,6 +426,7 @@ The normal checks are:
 make test
 go vet ./...
 sh -n test.sh example/nginx/build-rootfs.sh example/echo-server/build.sh
+GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/macker
 make macker
 ```
 

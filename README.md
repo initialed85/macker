@@ -166,7 +166,10 @@ no members or VXLAN plumbing yet.
 
 Macker supplies the workload with `MACKER_INTERFACE`, `MACKER_IP`,
 `MACKER_HOST_INTERFACE`, and `MACKER_HOST_IP` (for example, `bridge881` and
-`172.31.89.1`). In external mode, `MACKER_INTERFACE` and `MACKER_IP` are the
+`172.31.89.1`). Use `--workdir /absolute/path` to override the image's
+configured working directory; omitting it preserves the image default. The
+normalized override is persisted in metadata and inherited by later `exec`
+children. In external mode, `MACKER_INTERFACE` and `MACKER_IP` are the
 supplied existing interface and Pod IP; host-owned values are empty because
 Macker does not own or infer that network's gateway, unless optional
 `--host-interface IFACE --host-ip HOST_IP` values are supplied. For each published mapping
@@ -285,7 +288,8 @@ record before printing:
 ```
 
 The JSON object includes `status` (`running`, `paused`, `exited`, or `stopped`),
-the tracked launcher `pid` and `launcher_started_at`, the running or completed
+`working_dir` (the normalized run override, or an empty string when the image
+default is in use), the tracked launcher `pid` and `launcher_started_at`, the running or completed
 workload `workload_pid` and `workload_started_at` when available, `exit_code` (including the conventional `128 + signal` value
 for signal termination), `started_at`, `finished_at`, `termination_signal`,
 `termination_reason` (`exited`, `exited-with-error`, `signal`, or `stopped`),

@@ -35,6 +35,7 @@ RESPONSE=$(mktemp "${TMPDIR:-/tmp}/macker-response.XXXXXX")
 ENTRYPOINT_ENV=$(mktemp "${TMPDIR:-/tmp}/macker-entrypoint-env.XXXXXX")
 EXEC_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/macker-exec-output.XXXXXX")
 EXEC_STDIN_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/macker-exec-stdin-output.XXXXXX")
+WORKDIR_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/macker-workdir-output.XXXXXX")
 STARTED=0
 SIMPLE_STARTED=0
 ENTRYPOINT_STARTED=0
@@ -70,7 +71,7 @@ cleanup() {
             "$NGINX_AMD64_IMAGE" "$NGINX_ARM64_IMAGE" \
             >/dev/null 2>&1 || true
     fi
-    rm -rf "$WEBROOT" "$RESPONSE" "$ENTRYPOINT_ENV" "$EXEC_OUTPUT" "$EXEC_STDIN_OUTPUT" example/nginx-rootfs
+    rm -rf "$WEBROOT" "$RESPONSE" "$ENTRYPOINT_ENV" "$EXEC_OUTPUT" "$EXEC_STDIN_OUTPUT" "$WORKDIR_OUTPUT" example/nginx-rootfs
     exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -249,6 +250,16 @@ SIMPLE_STARTED=1
     "$SIMPLE_IMAGE"
 "$MACKER" rm "$SIMPLE_CONTAINER"
 SIMPLE_STARTED=0
+
+echo '==> testing high-level workdir override'
+"$MACKER" run \
+    --rm \
+    --net=host \
+    --name macker-test-workdir \
+    --workdir /app \
+    --entrypoint pwd \
+    "$SIMPLE_IMAGE" > "$WORKDIR_OUTPUT"
+grep -Eq '/containers/macker-test-workdir/rootfs/app$' "$WORKDIR_OUTPUT"
 
 ENTRYPOINT_CONTAINER=${ENTRYPOINT_CONTAINER:-macker-test-entrypoint}
 DEBUG_HOST_PORT=${DEBUG_HOST_PORT:-8081}

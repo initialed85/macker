@@ -167,8 +167,10 @@ func commandOCIBuild(args []string) error {
 	if !strings.HasPrefix(*entrypoint, "/") {
 		return errors.New("--entrypoint must be an absolute path inside the image")
 	}
-	if !strings.HasPrefix(*workingDir, "/") {
+	if normalized, err := normalizeWorkingDir(*workingDir); err != nil {
 		return errors.New("--workdir must be an absolute path inside the image")
+	} else {
+		*workingDir = normalized
 	}
 
 	return buildImage(buildOptions{
@@ -253,6 +255,7 @@ func commandOCIRun(args []string) error {
 	hostFallback := fs.Bool("host-fallback", false, "allow an image command to fall back to a host executable")
 	pidFile := fs.String("pid-file", "", "write the workload PID to this internal file")
 	entrypoint := fs.String("entrypoint", "", "override the image entrypoint")
+	workdirOverride := fs.String("workdir", "", "override the image working directory (absolute path)")
 	statusFile := fs.String("status-file", "", "write internal workload exit information to this file")
 	fs.BoolVar(interactive, "interactive", false, "keep standard input open")
 	fs.BoolVar(tty, "tty", false, "attach the caller's terminal")
@@ -322,8 +325,17 @@ func commandOCIRun(args []string) error {
 	if workdir == "" {
 		workdir = "/"
 	}
-	if !strings.HasPrefix(workdir, "/") {
+	if normalized, err := normalizeWorkingDir(workdir); err != nil {
 		return fmt.Errorf("image working directory %q is not absolute", workdir)
+	} else {
+		workdir = normalized
+	}
+	if *workdirOverride != "" {
+		normalized, err := normalizeWorkingDir(*workdirOverride)
+		if err != nil {
+			return fmt.Errorf("--workdir: %w", err)
+		}
+		workdir = normalized
 	}
 
 	envVars := mergeEnvironment(img.Config.Config.Env, env)
@@ -359,7 +371,7 @@ func commandOCIRun(args []string) error {
 			fmt.Fprintf(os.Stderr, "warning: command %q is not in the image; using host executable %s\n", command[0], hostCommand)
 		}
 		cmd = exec.Command(hostCommand, command[1:]...)
-		cmd.Dir = filepath.Join(extractDir, filepath.FromSlash(strings.TrimPrefix(workdir, "/")))
+		cmd.Dir = filepath.Join(extractDir, filepath.FromSlash(strings.TrimPrefix(path.Clean(workdir), "/")))
 		// Keep non-TTY workloads in their own process group so signals can
 		// reach the complete workload process tree. A TTY workload must remain
 		// in the caller's terminal process group or it cannot read the

@@ -110,6 +110,7 @@ type containerMetadata struct {
 	Name              string         `json:"name"`
 	Image             string         `json:"image"`
 	Network           string         `json:"network"`
+	WorkingDir        string         `json:"working_dir,omitempty"`
 	Env               []string       `json:"env,omitempty"`
 	Volumes           []volume       `json:"volumes,omitempty"`
 	Ports             []portMapping  `json:"ports,omitempty"`
@@ -155,6 +156,7 @@ type containerInspection struct {
 	Name              string        `json:"name"`
 	Image             string        `json:"image"`
 	Status            string        `json:"status"`
+	WorkingDir        string        `json:"working_dir"`
 	PID               int           `json:"pid"`
 	LauncherStartedAt *time.Time    `json:"launcher_started_at"`
 	WorkloadPID       int           `json:"workload_pid"`
@@ -242,7 +244,7 @@ Usage:
   macker push IMAGE
   macker pull IMAGE
   macker bundle [--no-push] SOURCE DARWIN-IMAGE
-  macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--env KEY=VALUE] [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
+  macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--workdir PATH] [--env KEY=VALUE] [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
   macker exec [-i|--interactive] [-t|--tty] NAME [-- COMMAND ARG...]
   macker logs [-f|--follow] NAME
   macker inspect [--format json|table] NAME
@@ -994,6 +996,13 @@ func replaceBundleLayout(target, staging string) error {
 	return nil
 }
 
+func normalizeWorkingDir(value string) (string, error) {
+	if value == "" || !strings.HasPrefix(value, "/") {
+		return "", fmt.Errorf("working directory %q is not absolute", value)
+	}
+	return path.Clean(value), nil
+}
+
 func commandRun(args []string) error {
 	args = expandInteractiveShortFlags(args)
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -1012,6 +1021,7 @@ func commandRun(args []string) error {
 	fs.BoolVar(interactive, "interactive", false, "keep standard input open")
 	fs.BoolVar(tty, "tty", false, "attach the caller's terminal")
 	entrypoint := fs.String("entrypoint", "", "override the image entrypoint")
+	workdir := fs.String("workdir", "", "override the image working directory (absolute path)")
 	var rawEnv stringList
 	fs.Var(&rawEnv, "env", "environment variable KEY=VALUE (repeatable)")
 	var rawVolumes stringList
@@ -1045,6 +1055,13 @@ func commandRun(args []string) error {
 	}
 	if !validContainerName(*name) {
 		return fmt.Errorf("invalid container name %q", *name)
+	}
+	if *workdir != "" {
+		normalized, err := normalizeWorkingDir(*workdir)
+		if err != nil {
+			return fmt.Errorf("--workdir: %w", err)
+		}
+		*workdir = normalized
 	}
 	if fs.NArg() < 1 {
 		return errors.New("run requires an image reference")
@@ -1188,6 +1205,7 @@ func commandRun(args []string) error {
 		Name:          *name,
 		Image:         ref.Normalized,
 		Network:       *network,
+		WorkingDir:    *workdir,
 		Volumes:       volumes,
 		Ports:         ports,
 		PFAnchor:      pfState.Anchor,
@@ -1219,6 +1237,9 @@ func commandRun(args []string) error {
 	ociRunArgs = append(ociRunArgs, networkEnvironmentArgs(networkCfg, ports)...)
 	if *entrypoint != "" {
 		ociRunArgs = append(ociRunArgs, "--entrypoint", *entrypoint)
+	}
+	if *workdir != "" {
+		ociRunArgs = append(ociRunArgs, "--workdir", *workdir)
 	}
 	ociRunArgs = append(ociRunArgs, layout)
 	if len(commandOverride) > 0 {
@@ -1392,6 +1413,9 @@ func commandExec(args []string) error {
 	}
 	if metadata.NetworkConfig != nil {
 		ociArgs = append(ociArgs, networkEnvironmentArgs(*metadata.NetworkConfig, metadata.Ports)...)
+	}
+	if metadata.WorkingDir != "" {
+		ociArgs = append(ociArgs, "--workdir", metadata.WorkingDir)
 	}
 	ociArgs = append(ociArgs, layout, "--")
 	ociArgs = append(ociArgs, command...)
@@ -1606,6 +1630,7 @@ func commandInspect(args []string) error {
 		Name:              metadata.Name,
 		Image:             metadata.Image,
 		Status:            status,
+		WorkingDir:        metadata.WorkingDir,
 		PID:               metadata.PID,
 		LauncherStartedAt: metadata.LauncherStartedAt,
 		WorkloadPID:       workloadPID,
@@ -1633,6 +1658,7 @@ func commandInspect(args []string) error {
 		fmt.Printf("Name: %s\\n", inspection.Name)
 		fmt.Printf("Image: %s\\n", inspection.Image)
 		fmt.Printf("Status: %s\\n", inspection.Status)
+		fmt.Printf("Working directory: %s\\n", valueOrDash(inspection.WorkingDir))
 		fmt.Printf("PID: %d\\n", inspection.PID)
 		fmt.Printf("Workload PID: %d\\n", inspection.WorkloadPID)
 		if inspection.ExitCode == nil {

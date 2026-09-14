@@ -37,6 +37,32 @@ func TestBuildEnvironmentSetsTargetArchitecture(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkingDir(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		bad   bool
+	}{
+		{input: "/", want: "/"},
+		{input: "/srv/../app", want: "/app"},
+		{input: "//tmp///work", want: "/tmp/work"},
+		{input: "relative", bad: true},
+		{input: "", bad: true},
+	}
+	for _, test := range tests {
+		got, err := normalizeWorkingDir(test.input)
+		if test.bad {
+			if err == nil {
+				t.Errorf("normalizeWorkingDir(%q) succeeded, want error", test.input)
+			}
+			continue
+		}
+		if err != nil || got != test.want {
+			t.Errorf("normalizeWorkingDir(%q) = %q, %v; want %q", test.input, got, err, test.want)
+		}
+	}
+}
+
 func TestParseImageRefDefaultsDockerHub(t *testing.T) {
 	ref, err := parseImageRef("initialed85/nginx-darwin:latest")
 	if err != nil {
@@ -968,11 +994,12 @@ func TestContainerStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata := containerMetadata{
-		Name:      "demo",
-		Image:     "docker.io/library/demo:latest",
-		Network:   "host",
-		Env:       []string{"FOO=bar", "MULTI=one"},
-		CreatedAt: time.Now().UTC(),
+		Name:       "demo",
+		Image:      "docker.io/library/demo:latest",
+		Network:    "host",
+		WorkingDir: "/srv/app",
+		Env:        []string{"FOO=bar", "MULTI=one"},
+		CreatedAt:  time.Now().UTC(),
 	}
 	if err := writeContainerMetadata(containerDir, metadata); err != nil {
 		t.Fatal(err)
@@ -990,6 +1017,9 @@ func TestContainerStateRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(roundTrip.Env, metadata.Env) {
 		t.Fatalf("metadata env = %#v, want %#v", roundTrip.Env, metadata.Env)
+	}
+	if roundTrip.WorkingDir != metadata.WorkingDir {
+		t.Fatalf("metadata working directory = %q, want %q", roundTrip.WorkingDir, metadata.WorkingDir)
 	}
 
 	data, err := os.ReadFile(filepath.Join(home, "state.json"))

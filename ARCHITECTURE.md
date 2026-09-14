@@ -135,8 +135,9 @@ than Docker daemon image names.
 
 A high-level `run` performs these phases before launching the workload:
 
-1. Parse and validate networking, environment, volume, entrypoint, and publish
-   options.
+1. Parse and validate networking, environment, volume, entrypoint, working
+   directory, and publish options. An absolute `--workdir` override is
+   normalized and persisted; omission preserves the image default.
 2. Resolve the image. `scratch` and `scratch:latest` are local sentinels: Macker
    creates/reuses a minimal empty Darwin OCI layout under its temporary state
    directory and never pulls or registers it as a user image.
@@ -163,8 +164,9 @@ filesystem and does not provide copy-on-write isolation.
 
 `macker oci run` loads the image config, selects the Darwin workload matching
 the host architecture (`darwin/arm64` or `darwin/amd64`), resolves its
-entrypoint and arguments, sets the configured environment and
-working directory, and launches the native Mach-O command. Non-chroot mode
+entrypoint and arguments, applies an optional absolute `--workdir` override
+(or the image working directory), sets the configured environment, and launches
+the native Mach-O command. Non-chroot mode
 runs from the extracted rootfs directory while retaining the host's process,
 filesystem, and network view. An explicit runtime entrypoint may use a host
 executable fallback for debugging when the command is absent from the image.
@@ -296,8 +298,8 @@ The default state root is `${MACKER_HOME:-$HOME/.macker}`:
 `state.json` is versioned and contains image and container indexes. Macker uses
 an advisory lock and atomic temporary-file replacement when updating it.
 Container metadata is written atomically as well. The metadata records image,
-network, volumes, published mappings, PF anchor/token, environment, lifecycle
-timestamps, PID, and auto-remove policy.
+network, optional working-directory override, volumes, published mappings, PF
+anchor/token, environment, lifecycle timestamps, PID, and auto-remove policy.
 
 Detached lifecycle behavior:
 

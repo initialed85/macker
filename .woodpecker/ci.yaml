@@ -11,6 +11,11 @@ steps:
     image: docker.io/library/golang:1.22
     commands:
       - go version
+      # proxy.golang.org resets HTTP/2 streams under load and `go test` does not retry; the second
+      # attempt reads from the module cache for anything that already landed, so it is nearly free
+      # when the first one was fine. `||` keeps the real exit code. maclet's first run died on exactly
+      # this (k8s.io/apimachinery stream ID 1; INTERNAL_ERROR; received from peer).
+      - go mod download || go mod download
       - gofmt -l .
       - test -z "$(gofmt -l .)"
       - go vet ./...

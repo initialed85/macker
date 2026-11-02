@@ -1,6 +1,8 @@
 # GitHub Release on every push to master. This is the port of .github/workflows/release.yml (deleted in
-# the same commit), and it keeps that workflow's shape: two cross-compile legs for darwin/amd64 and
-# darwin/arm64, then one publish with GitHub's generated notes.
+# the same commit), and it keeps that workflow's shape: a darwin/arm64 leg, then one publish with GitHub's
+# generated notes. The darwin/amd64 leg GitHub Actions ran is deliberately gone. The Intel/Catalina target is
+# the too-hard basket - the old Intel MacBook never came back up - so the only Mac artifact this repo ships
+# is arm64. Bringing Intel back wants a machine to test on, not merely a cross-compile that nobody has run.
 #
 # Four translation notes, because GitHub Actions and Woodpecker differ in exactly the places this workflow
 # cares about:
@@ -27,8 +29,8 @@
 #    expanded and cannot read a file, so a title derived during the build cannot reach the plugin; the
 #    title is the tag (`build-N`). The tag is what users install from, the title is cosmetic.
 #
-# The Go versions per arch are not style choices: 1.22 is the last toolchain whose Darwin binaries run on
-# macOS Catalina, which is why the Intel artifact is pinned to 1.22.12 while arm64 rides the current one.
+# The Go toolchain here is the current one. 1.22 used to be pinned for the Intel leg because it is the last
+# toolchain whose Darwin binaries run on macOS Catalina; that leg is gone, so the pin went with it.
 #
 # The token is the native k8s Secret woodpecker/github-token mapped to PLUGIN_TOKEN by
 # backend_options.kubernetes.secrets (the Linux agents run with
@@ -54,8 +56,8 @@ steps:
       - echo "publishing $(cat .build/TAG), derived from the tags that already exist"
       - sed -n 's#.*refs/tags/##p' build-tags.txt | grep -E '^build-[0-9]+$' | sort -V | tail -n 3
 
-  - name: build-darwin-amd64
-    image: docker.io/library/golang:1.22.12
+  - name: build-darwin-arm64
+    image: docker.io/library/golang:1.26.5
     depends_on: [resolve-build-number]
     commands:
       - go version
@@ -67,33 +69,22 @@ steps:
       - sh -n test.sh
       - sh -n example/nginx/build-rootfs.sh
       - sh -n example/echo-server/build.sh
-      # the same cross-compile check GHA ran: a darwin test binary that does not even link is a build
-      # failure, not a test failure.
-      - env GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go test -c -o /tmp/macker-amd64.test ./cmd/macker
-      - mkdir -p dist/macker-darwin-amd64
-      - env GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o dist/macker-darwin-amd64/macker ./cmd/macker
-      - file dist/macker-darwin-amd64/macker
-      - tar -C dist -czf dist/macker-darwin-amd64.tar.gz macker-darwin-amd64
-      - (cd dist && sha256sum macker-darwin-amd64.tar.gz > macker-darwin-amd64.tar.gz.sha256)
-
-  - name: build-darwin-arm64
-    image: docker.io/library/golang:1.26.5
-    depends_on: [resolve-build-number]
-    commands:
-      - go version
-      - go mod download || go mod download
-      - go vet ./...
-      - go test -count=1 ./...
+      # the cross-compile check GHA ran: a darwin test binary that does not even link is a build failure,
+      # not a test failure, and it is not run here because an arm64 host cannot execute an amd64 one.
       - env GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go test -c -o /tmp/macker-arm64.test ./cmd/macker
       - mkdir -p dist/macker-darwin-arm64
       - env GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o dist/macker-darwin-arm64/macker ./cmd/macker
-      - file dist/macker-darwin-arm64/macker
+      # `file` is not installed in the golang image, so the format is asserted from the Mach-O header
+      # instead: cffaedfe is MH_MAGIC_64 and the cputype that follows it, stored little-endian, is 0c000001
+      # for arm64. GHA could call `file` because Ubuntu runners ship it; macker #4 died on
+      # /bin/sh: file: not found in both legs before this replaced it.
+      - head -c 12 dist/macker-darwin-arm64/macker | od -An -tx1 | tr -d ' ' | grep -q '^cffaedfe0c000001'
       - tar -C dist -czf dist/macker-darwin-arm64.tar.gz macker-darwin-arm64
       - (cd dist && sha256sum macker-darwin-arm64.tar.gz > macker-darwin-arm64.tar.gz.sha256)
 
   - name: release
     image: docker.io/initialed85/wp-gh-release:latest
-    depends_on: [build-darwin-amd64, build-darwin-arm64]
+    depends_on: [build-darwin-arm64]
     settings:
       tag_file: .build/TAG
       generate_notes: true

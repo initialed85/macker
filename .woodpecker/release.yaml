@@ -11,7 +11,7 @@
 #    same dist/ — steps of one workflow share a workspace on the k8s backend, which is how the publish step
 #    sees both archives without an artifact store.
 #
-# 2. The tag cannot be the pipeline number. GHA used `build-${{ github.run_number }}`, and GitHub's
+# 2. The tag cannot be the pipeline number. GHA built its tag as `build-` plus GitHub's run_number, and GitHub's
 #    run_number for this repo is a counter that keeps climbing across every workflow that ever ran here.
 #    Woodpecker's per-repo pipeline number restarts at 1, so `build-1` would either collide with an
 #    existing tag or silently re-tag an old release (the plugin reuses the release for a tag rather than
@@ -23,7 +23,7 @@
 #    ci/woodpecker/plugins/gh-release) and glob expansion in settings.files. A pattern matching nothing is
 #    fatal, which is what `if-no-files-found: error` meant.
 #
-# 4. One deliberate difference: GHA titled the release `Build ${{ github.run_number }}`. settings: is not
+# 4. One deliberate difference: GHA titled the release "Build N" from GitHub's run_number. settings: is not
 #    expanded and cannot read a file, so a title derived during the build cannot reach the plugin; the
 #    title is the tag (`build-N`). The tag is what users install from, the title is cosmetic.
 #
@@ -33,6 +33,12 @@
 # The token is the native k8s Secret woodpecker/github-token mapped to PLUGIN_TOKEN by
 # backend_options.kubernetes.secrets (the Linux agents run with
 # WOODPECKER_BACKEND_K8S_ALLOW_NATIVE_SECRETS=true). No credential appears in this file.
+#
+# What the publish step depends on, learned the hard way: it hands wp-gh-release a glob, and the plugin
+# replaces any asset whose name already exists so a re-run cannot 422. That match is exact and client-side,
+# because GitHub's list-assets endpoint accepts a `name` query parameter and ignores it - asking for one
+# asset returns every asset on the release. An earlier revision deleted what it was handed, which is how
+# maclet build-39 published a release holding a checksum and no 6.3 MB binary with a green pipeline.
 steps:
   - name: resolve-build-number
     image: docker.io/library/golang:1.26.5

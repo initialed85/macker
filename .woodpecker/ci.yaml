@@ -1,0 +1,25 @@
+# Macker: an OCI image tool in Go. The gate is fmt, vet, the unit tests and a build of the CLI, on the
+# go.mod line (1.22).
+#
+# What is deliberately NOT here: ./test.sh. It is an end-to-end smoke test that builds Linux amd64 and
+# arm64 images with Docker, hand-assembles a three-platform manifest list, bundles a native Darwin image
+# and then *runs* the Darwin nginx image. That needs a docker daemon, a registry login and a Mac, so it
+# is a local test, not a CI step. `go build ./...` still covers the CLI, which is the part that would
+# otherwise rot.
+steps:
+  - name: test
+    image: docker.io/library/golang:1.22
+    commands:
+      - go version
+      - gofmt -l .
+      - test -z "$(gofmt -l .)"
+      - go vet ./...
+      - go test -count=1 ./...
+      # the product is the CLI, and it is the one package the tests above do not compile
+      - go build -o bin/macker ./cmd/macker
+      - ./bin/macker --help
+
+when:
+  - event: push
+    branch: master
+  - event: pull_request

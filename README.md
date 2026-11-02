@@ -358,6 +358,34 @@ must provide Intel-compatible nginx dependencies for the nginx example. As
 with all Macker workloads, this is a trusted native process rather than an
 isolated macOS container.
 
+## Woodpecker CI agent on Darwin
+
+Woodpecker's `local` backend is the Darwin backend: it runs every pipeline step
+as an ordinary macOS process, so a pipeline can use the host toolchain (the Xcode
+`vmnet` framework, `pkgbuild`, `codesign`, `otool`, Homebrew rust and go). The
+other backends build Linux containers, which is what the cluster agents are for.
+
+```sh
+make agent          # build initialed85/woodpecker-agent-darwin at {AGENT_TAG,latest}
+make agent-push     # build both tags and publish them
+make agent-version  # run the published image just far enough to print its version
+make agent-pull     # pull the published image back into local storage
+```
+
+`example/woodpecker-agent/build.sh` assembles the rootfs from upstream pinned
+releases and verifies them against the upstream `checksums.txt`:
+
+- `woodpecker-ci/woodpecker` `v3.20.1`, asset `woodpecker-agent_darwin_{arm64,amd64}.tar.gz`
+- `woodpecker-ci/plugin-git` `2.11.0`, asset `darwin-{arm64,amd64}_plugin-git`
+
+`plugin-git` is bundled because the local backend resolves the clone plugin with
+`exec.LookPath`; without it the agent downloads an unpinned `latest` binary for
+every workflow that clones. Both binaries are re-signed ad-hoc after copying,
+because `codesign --verify` is the only verification available for a rootfs that
+nothing has checked. Woodpecker connection settings, routing labels, and the
+agent token are deployment configuration and are supplied with `run --env` by
+the launcher; see `hosts/woodpecker-agent/` in `home-ops`.
+
 For the direct OCI hello experiment, use the `macker oci` subcommands:
 
 ```sh

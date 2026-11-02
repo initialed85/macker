@@ -10,10 +10,13 @@ NGINX_IMAGE := example/nginx-image
 NGINX_PULL_LAYOUT := $(NGINX_IMAGE).pulling
 NGINX_CONFIG := example/nginx/nginx.conf
 ECHO_IMAGE ?= initialed85/echo-server:latest
+AGENT_IMAGE ?= initialed85/woodpecker-agent-darwin
+AGENT_TAG ?= v3.20.1
+AGENT_TAGS ?= $(AGENT_TAG) latest
 REGISTRY_IMAGE ?=
 SKOPEO ?= skopeo
 
-.PHONY: all build macker hello image nginx-rootfs nginx nginx-run nginx-push nginx-pull echo-server echo-server-push echo-server-bundle inspect unpack run push pull test clean
+.PHONY: all build macker hello image nginx-rootfs nginx nginx-run nginx-push nginx-pull echo-server echo-server-push echo-server-bundle agent agent-push agent-pull agent-version inspect unpack run push pull test clean
 
 all: image
 
@@ -120,6 +123,23 @@ echo-server-push: echo-server
 
 echo-server-bundle: echo-server
 	$(MACKER) bundle ealen/echo-server:latest $(ECHO_IMAGE)
+
+# The Woodpecker CI agent for Darwin. Every tag is a separate build because the
+# builder stores images by reference and has no retag command.
+agent: build
+	@for tag in $(AGENT_TAGS); do $(MACKER) build -f example/woodpecker-agent/Mackerfile -t $(AGENT_IMAGE):$$tag .; done
+
+agent-push: agent
+	@for tag in $(AGENT_TAGS); do $(MACKER) push $(AGENT_IMAGE):$$tag; done
+
+agent-pull: build
+	$(MACKER) pull $(AGENT_IMAGE):$(AGENT_TAG)
+
+agent-version:
+	$(MACKER) run --rm --net=external --interface=lo0 --ip=127.0.0.1 \
+		--name=woodpecker-agent-version \
+		--entrypoint /usr/local/bin/woodpecker-agent \
+		$(AGENT_IMAGE):$(AGENT_TAG) -- --version
 
 test:
 	go test ./...

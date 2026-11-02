@@ -1,0 +1,29 @@
+FROM scratch
+
+# Woodpecker's agent is the component that turns queued pipeline steps into
+# work. On Darwin the only sane backend is `local`: the alternative is one
+# Linux pod per step, which is exactly what the cluster agents are for. The
+# local backend runs each step as an ordinary macOS process, so a Darwin
+# pipeline can use the host's Xcode toolchain (vmnet framework, pkgbuild,
+# codesign, otool) and Homebrew rust/go directly.
+#
+# Connection settings (server address, agent token, routing labels) are
+# deployment configuration, not image content, and are supplied with `run
+# --env` by the host-side launcher.
+RUN sh "$MACKER_CONTEXT/example/woodpecker-agent/build.sh" "$MACKER_ROOTFS"
+
+# PATH is used twice: Macker resolves the image entrypoint through it inside
+# the rootfs, and the agent passes it to every pipeline step, which resolves
+# shells and plugin binaries from the host. /usr/local/bin is therefore both
+# the image's own bin directory and the host directory the launcher stages the
+# pinned plugin-git into.
+ENV PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# The agent resolves the shell for a `commands:` step with exec.LookPath, and
+# the local backend replaces HOME per workflow, so the toolchain anchors that
+# default to $HOME have to be absolute here rather than inherited.
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+ENV TMPDIR=/tmp
+ENV SSL_CERT_FILE=/etc/ssl/cert.pem
+WORKDIR /
+ENTRYPOINT ["/usr/local/bin/woodpecker-agent"]

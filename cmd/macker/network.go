@@ -260,6 +260,14 @@ func networkEnvironmentArgs(config networkConfig, ports []portMapping) []string 
 
 func cleanupContainerResources(home, name string, metadata *containerMetadata) error {
 	var cleanupErrors []error
+	if len(metadata.MountedVolumes) > 0 {
+		rootfs := filepath.Join(home, "containers", name, "rootfs")
+		if err := unmountReadOnlyVolumes(rootfs, metadata.MountedVolumes); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		} else {
+			metadata.MountedVolumes = nil
+		}
+	}
 	if metadata.PFAnchor != "" || metadata.PFToken != "" {
 		if err := cleanupPFPortMappings(pfPortState{Anchor: metadata.PFAnchor, Token: metadata.PFToken}); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("clean up port mappings for container %q: %w", name, err))

@@ -90,11 +90,6 @@ type buildSpec struct {
 	FromScratch bool
 }
 
-type volume struct {
-	HostPath      string
-	ContainerPath string
-}
-
 type portMapping struct {
 	HostPort uint16 `json:"host_port"`
 	NodePort uint16 `json:"node_port"`
@@ -107,12 +102,17 @@ type pfPortState struct {
 }
 
 type containerMetadata struct {
-	Name              string         `json:"name"`
-	Image             string         `json:"image"`
-	Network           string         `json:"network"`
-	WorkingDir        string         `json:"working_dir,omitempty"`
-	Env               []string       `json:"env,omitempty"`
-	Volumes           []volume       `json:"volumes,omitempty"`
+	Name       string   `json:"name"`
+	Image      string   `json:"image"`
+	Network    string   `json:"network"`
+	WorkingDir string   `json:"working_dir,omitempty"`
+	Env        []string `json:"env,omitempty"`
+	Volumes    []volume `json:"volumes,omitempty"`
+	// MountedVolumes is the subset of Volumes whose read-only mount is live
+	// right now. It is what cleanup and reconciliation unmount, and it is what
+	// `inspect` shows as mounted; Volumes itself is the requested shape and is
+	// kept after a stop so the configuration stays inspectable.
+	MountedVolumes    []volume       `json:"mounted_volumes,omitempty"`
 	Ports             []portMapping  `json:"ports,omitempty"`
 	PFAnchor          string         `json:"pf_anchor,omitempty"`
 	PFToken           string         `json:"pf_token,omitempty"`
@@ -153,21 +153,23 @@ func (e *workloadExitError) Error() string { return e.err.Error() }
 func (e *workloadExitError) Unwrap() error { return e.err }
 
 type containerInspection struct {
-	Name              string        `json:"name"`
-	Image             string        `json:"image"`
-	Status            string        `json:"status"`
-	WorkingDir        string        `json:"working_dir"`
-	PID               int           `json:"pid"`
-	LauncherStartedAt *time.Time    `json:"launcher_started_at"`
-	WorkloadPID       int           `json:"workload_pid"`
-	ExitCode          *int          `json:"exit_code"`
-	StartedAt         *time.Time    `json:"started_at"`
-	FinishedAt        *time.Time    `json:"finished_at"`
-	TerminationSignal string        `json:"termination_signal"`
-	TerminationReason string        `json:"termination_reason"`
-	PausedAt          *time.Time    `json:"paused_at"`
-	WorkloadStartedAt *time.Time    `json:"workload_started_at"`
-	Ports             []portMapping `json:"ports"`
+	Name              string             `json:"name"`
+	Image             string             `json:"image"`
+	Status            string             `json:"status"`
+	WorkingDir        string             `json:"working_dir"`
+	PID               int                `json:"pid"`
+	LauncherStartedAt *time.Time         `json:"launcher_started_at"`
+	WorkloadPID       int                `json:"workload_pid"`
+	ExitCode          *int               `json:"exit_code"`
+	StartedAt         *time.Time         `json:"started_at"`
+	FinishedAt        *time.Time         `json:"finished_at"`
+	TerminationSignal string             `json:"termination_signal"`
+	TerminationReason string             `json:"termination_reason"`
+	PausedAt          *time.Time         `json:"paused_at"`
+	WorkloadStartedAt *time.Time         `json:"workload_started_at"`
+	Ports             []portMapping      `json:"ports"`
+	Volumes           []volumeInspection `json:"volumes"`
+	MountedVolumes    []volumeInspection `json:"mounted_volumes"`
 }
 
 type imageRecord struct {
@@ -247,7 +249,7 @@ Usage:
   macker pull IMAGE
   macker bundle [--no-push] SOURCE DARWIN-IMAGE
   macker platforms [--format json] IMAGE
-  macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--workdir PATH] [--env KEY=VALUE] [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
+  macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--workdir PATH] [--env KEY=VALUE] [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER[:ro]] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
   macker exec [-i|--interactive] [-t|--tty] NAME [-- COMMAND ARG...]
   macker logs [-f|--follow] NAME
   macker inspect [--format json|table] NAME
@@ -1040,7 +1042,7 @@ func commandRun(args []string) error {
 	var rawEnv stringList
 	fs.Var(&rawEnv, "env", "environment variable KEY=VALUE (repeatable)")
 	var rawVolumes stringList
-	fs.Var(&rawVolumes, "v", "host path and container path, HOST:CONTAINER (repeatable)")
+	fs.Var(&rawVolumes, "v", "host path and container path, HOST:CONTAINER[:ro] (repeatable)")
 	var rawPorts stringList
 	fs.Var(&rawPorts, "p", "publish HOST_PORT:NODE_PORT[/tcp|/udp] (NODE_PORT may be auto or 0)")
 	fs.Var(&rawPorts, "publish", "publish HOST_PORT:NODE_PORT[/tcp|/udp] (NODE_PORT may be auto or 0)")
@@ -1156,6 +1158,7 @@ func commandRun(args []string) error {
 	setupComplete := false
 	var pfState pfPortState
 	pfInstalled := false
+	mountedVolumes := false
 	var networkCfg networkConfig
 	networkInstalled := false
 	defer func() {
@@ -1164,6 +1167,9 @@ func commandRun(args []string) error {
 		}
 		if networkInstalled {
 			_ = cleanupMackerNetwork(home, *name, networkCfg)
+		}
+		if mountedVolumes {
+			_ = unmountReadOnlyVolumes(rootfs, volumes)
 		}
 		if !setupComplete {
 			_ = unregisterContainerState(home, *name)
@@ -1199,11 +1205,16 @@ func commandRun(args []string) error {
 	} else if replacedFiles > 0 {
 		fmt.Fprintf(os.Stderr, "substituted Macker tokens in %d config file(s)\n", replacedFiles)
 	}
+	mountedVolumesList := make([]volume, 0, len(volumes))
 	for _, mount := range volumes {
 		if err := installVolume(rootfs, mount); err != nil {
 			return err
 		}
+		if mount.ReadOnly {
+			mountedVolumesList = append(mountedVolumesList, mount)
+		}
 	}
+	mountedVolumes = len(mountedVolumesList) > 0
 	if len(ports) > 0 {
 		if *network == "external" {
 			pfState, err = installPFPortMappingsForTargetIP(*name, networkCfg.IP, ports)
@@ -1217,19 +1228,20 @@ func commandRun(args []string) error {
 	}
 	startedAt := time.Now().UTC()
 	metadata := containerMetadata{
-		Name:          *name,
-		Image:         ref.Normalized,
-		Network:       *network,
-		WorkingDir:    *workdir,
-		Volumes:       volumes,
-		Ports:         ports,
-		PFAnchor:      pfState.Anchor,
-		PFToken:       pfState.Token,
-		NetworkConfig: &networkCfg,
-		Env:           append([]string(nil), rawEnv...),
-		AutoRemove:    *autoRemove,
-		CreatedAt:     time.Now().UTC(),
-		StartedAt:     &startedAt,
+		Name:           *name,
+		Image:          ref.Normalized,
+		Network:        *network,
+		WorkingDir:     *workdir,
+		Volumes:        volumes,
+		MountedVolumes: mountedVolumesList,
+		Ports:          ports,
+		PFAnchor:       pfState.Anchor,
+		PFToken:        pfState.Token,
+		NetworkConfig:  &networkCfg,
+		Env:            append([]string(nil), rawEnv...),
+		AutoRemove:     *autoRemove,
+		CreatedAt:      time.Now().UTC(),
+		StartedAt:      &startedAt,
 	}
 	exitPath := filepath.Join(containerDir, "exit.json")
 	workloadPIDPath := filepath.Join(containerDir, "workload.pid")
@@ -1318,6 +1330,8 @@ func commandRun(args []string) error {
 	}
 	pfInstalled = false
 	networkInstalled = false
+	volumeCleanupErr := unmountReadOnlyVolumes(rootfs, metadata.MountedVolumes)
+	metadata.MountedVolumes = nil
 	metadata.PID = 0
 	metadata.LauncherStartedAt = nil
 	metadata.WorkloadPID = 0
@@ -1325,7 +1339,7 @@ func commandRun(args []string) error {
 	metadata.WorkloadStartedAt = nil
 	stoppedAt := time.Now().UTC()
 	metadata.StoppedAt = &stoppedAt
-	resourceCleanupErr := cleanupContainerResources(home, *name, &metadata)
+	resourceCleanupErr := errors.Join(volumeCleanupErr, cleanupContainerResources(home, *name, &metadata))
 	metadataWriteErr := writeContainerMetadata(containerDir, metadata)
 	if metadata.AutoRemove && resourceCleanupErr == nil && metadataWriteErr == nil {
 		removeErr := removeContainer(home, *name)
@@ -1657,6 +1671,8 @@ func commandInspect(args []string) error {
 		PausedAt:          metadata.PausedAt,
 		WorkloadStartedAt: metadata.WorkloadStartedAt,
 		Ports:             append([]portMapping{}, metadata.Ports...),
+		Volumes:           volumeInspections(metadata.Volumes),
+		MountedVolumes:    volumeInspections(metadata.MountedVolumes),
 	}
 	if *jsonOutput {
 		*format = "json"
@@ -1686,6 +1702,17 @@ func commandInspect(args []string) error {
 		fmt.Printf("Termination signal: %s\\n", valueOrDash(inspection.TerminationSignal))
 		fmt.Printf("Termination reason: %s\\n", valueOrDash(inspection.TerminationReason))
 		fmt.Printf("Paused: %s\\n", inspectionTime(inspection.PausedAt))
+		if len(inspection.Volumes) == 0 {
+			fmt.Println("Volumes: -")
+		} else {
+			for _, mount := range inspection.Volumes {
+				mode := "rw"
+				if mount.ReadOnly {
+					mode = "ro"
+				}
+				fmt.Printf("Volume: %s -> %s (%s)\\n", mount.HostPath, mount.ContainerPath, mode)
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("unsupported inspect format %q; use table or json", *format)
@@ -2046,6 +2073,13 @@ func commandRM(args []string) error {
 			return err
 		}
 	}
+	// A read-only volume mount that is still live would make the rootfs removal
+	// fail with EBUSY, so detach anything left before removing the directory.
+	if len(metadata.MountedVolumes) > 0 {
+		if err := cleanupContainerResources(home, name, &metadata); err != nil {
+			return err
+		}
+	}
 
 	if err := removeContainer(home, name); err != nil {
 		return err
@@ -2104,7 +2138,7 @@ func commandPS(args []string) error {
 					return err
 				}
 			}
-			if status != "running" && status != "paused" && (metadata.PFAnchor != "" || metadata.PFToken != "" || metadata.NetworkConfig != nil) {
+			if status != "running" && status != "paused" && (metadata.PFAnchor != "" || metadata.PFToken != "" || metadata.NetworkConfig != nil || len(metadata.MountedVolumes) > 0) {
 				if err := cleanupContainerResources(home, name, &metadata); err != nil {
 					return err
 				}
@@ -3076,28 +3110,6 @@ func waitForProcessExit(pid int, timeout time.Duration) error {
 	}
 }
 
-func parseVolume(raw string) (volume, error) {
-	parts := strings.Split(raw, ":")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return volume{}, fmt.Errorf("invalid volume %q; expected HOST:CONTAINER", raw)
-	}
-	host, err := filepath.Abs(parts[0])
-	if err != nil {
-		return volume{}, fmt.Errorf("resolve volume host path: %w", err)
-	}
-	if !filepath.IsAbs(parts[1]) {
-		return volume{}, fmt.Errorf("volume container path %q must be absolute", parts[1])
-	}
-	if _, err := os.Lstat(host); err != nil {
-		return volume{}, fmt.Errorf("volume host path %q: %w", host, err)
-	}
-	container := path.Clean(parts[1])
-	if container == "/" || container == "." || strings.HasPrefix(container, "/../") || container == ".." {
-		return volume{}, fmt.Errorf("invalid volume container path %q", parts[1])
-	}
-	return volume{HostPath: host, ContainerPath: container}, nil
-}
-
 func checkPublishedPortConflicts(home, name string, ports []portMapping) error {
 	return checkPublishedPortConflictsForTarget(home, name, "", ports)
 }
@@ -3357,28 +3369,6 @@ func validContainerName(name string) bool {
 		return false
 	}
 	return true
-}
-
-func installVolume(rootfs string, mount volume) error {
-	relative := strings.TrimPrefix(filepath.FromSlash(mount.ContainerPath), string(filepath.Separator))
-	target := filepath.Join(rootfs, relative)
-	rel, err := filepath.Rel(rootfs, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("volume target escapes container rootfs: %q", mount.ContainerPath)
-	}
-	if err := ensureNoSymlinkParents(rootfs, target); err != nil {
-		return fmt.Errorf("volume target %q: %w", mount.ContainerPath, err)
-	}
-	if err := removeExisting(target); err != nil {
-		return fmt.Errorf("replace volume target %q: %w", mount.ContainerPath, err)
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return fmt.Errorf("create volume parent %q: %w", mount.ContainerPath, err)
-	}
-	if err := os.Symlink(mount.HostPath, target); err != nil {
-		return fmt.Errorf("link volume %q: %w", mount.ContainerPath, err)
-	}
-	return nil
 }
 
 func parseMackerfile(filename string) (buildSpec, error) {

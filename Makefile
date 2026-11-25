@@ -17,7 +17,7 @@ AGENT_TAGS ?= $(AGENT_TAG) latest
 REGISTRY_IMAGE ?=
 SKOPEO ?= skopeo
 
-.PHONY: all build macker hello image nginx-rootfs nginx nginx-run nginx-push nginx-pull echo-server echo-server-push echo-server-bundle agent agent-push agent-pull agent-version platforms inspect unpack run push pull test clean
+.PHONY: all build macker hello image nginx-rootfs nginx nginx-run nginx-push nginx-pull echo-server echo-server-push echo-server-bundle agent agent-push agent-pull agent-version platforms inspect unpack run push pull test test-ro clean
 
 all: image
 
@@ -144,6 +144,11 @@ agent-version:
 
 test:
 	go test ./...
+
+# Kernel read-only volume acceptance test. Darwin nodes only, and it needs
+# passwordless sudo for mount_nullfs.
+test-ro: build
+	./test/read_only_volume.sh
 
 # Report which platforms an image offers and whether this host can run one of
 # them. Reads local storage first, then asks the registry through Skopeo.

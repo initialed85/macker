@@ -145,7 +145,7 @@ reference is stored, otherwise it asks the registry through Skopeo:
 # runnable here (darwin/arm64): no
 # reason: docker.io/library/busybox:1.36 offers linux/386, linux/amd64, ...; Macker needs a
 # darwin/arm64 manifest, and Linux manifests cannot execute on macOS. Use
-# `macker run --entrypoint COMMAND -v HOST:CONTAINER scratch` for volume-mounted Darwin jobs,
+# `macker run --entrypoint COMMAND -v HOST:CONTAINER[:ro] scratch` for volume-mounted Darwin jobs,
 # or build a Darwin image for the workload
 
 ./bin/macker platforms --format json nginx:latest
@@ -322,10 +322,48 @@ Detached `run` records this information when its OCI child exits; `inspect` and
 Use `macker rm --force NAME` to stop and remove a running or paused container.
 `macker images` lists local images and `macker rmi IMAGE` removes an image layout;
 removing an image does not remove existing container rootfs directories.
-Volumes are live symlinks to host paths, not kernel mounts. Host networking is
+Writable volumes are live symlinks to host paths, not kernel mounts. A volume
+marked `HOST:CONTAINER:ro` is kernel-enforced instead: Macker creates a nullfs
+mount point under the container rootfs and mounts the host path with `ro`
+(`mount_nullfs -o ro`), so create, modify and unlink inside it fail with `EROFS`
+for the launched workload and for every other process on the node while the
+mount is live. That needs root or passwordless sudo, works only on Darwin nodes,
+and applies to directory host paths because `mount_nullfs` cannot mount a single
+file read-only. The mount is recorded in the container metadata as
+`mounted_volumes` and removed on workload exit, `stop`, `rm`, and the next
+`ps`/`inspect` after a container is killed externally; `inspect --format json`
+reports both the requested `volumes` and the currently `mounted_volumes` with
+their `read_only` state. Host networking is
 shared, so wildcard listeners can collide on ports. `stop`, `rm`, foreground
 exit, and `ps` cleanup remove PF mappings; a detached workload that is killed
 externally is cleaned up the next time it is observed by Macker.
+
+## Volumes
+
+`-v HOST:CONTAINER` maps a host path into the container rootfs as a live
+symlink, which is what a non-chroot host process needs and nothing more.
+
+`-v HOST:CONTAINER:ro` is enforced instead of trusted. Macker mounts the host
+path read-only with `mount_nullfs -o ro` at a mount point inside the container
+rootfs, so the launched workload cannot create, modify or unlink anything under
+it:
+
+```sh
+./bin/macker run --rm --name reader --entrypoint /bin/sh \
+  -v "$HOME/.pi/agent/sessions:$HOME/.pi/agent/sessions:ro" scratch -- \
+  -c 'touch "$HOME/.pi/agent/sessions/should-fail"'
+# touch: .../should-fail: Read-only file system
+```
+
+Read-only volumes need a Darwin node, a directory host path (macOS
+`mount_nullfs` cannot mount a single file read-only), and root or passwordless
+sudo, exactly like PF port publishing and network setup. `:rw` and any other
+third field are rejected with an error; writable is the default and needs no
+option. The mount is unmounted on exit, `stop`, `rm` and reconciliation after an
+external kill, and `macker inspect --format json` reports both the requested
+`volumes` and the live `mounted_volumes` with `read_only`, so a caller such as
+maclet can confirm the enforcement rather than assume it. `make test-ro` runs
+the create/modify/unlink acceptance test on a Mac node.
 
 ## Examples and tests
 
@@ -467,7 +505,9 @@ Pull requests run the checks and build but do not create releases.
   per-process network isolation. The initial bridge interfaces are host-wide
   plumbing only.
 - CPU, memory, and process limits are not enforced.
-- Volumes are symlinks rather than isolated mounts.
+- Writable volumes are symlinks rather than isolated mounts; `:ro` volumes are
+  nullfs mounts, which are kernel-enforced but node-wide for the mount's
+  lifetime rather than scoped to the launched process.
 - PF publishing is IPv4-only and is global host configuration rather than
   container isolation.
 - Only `sha256` OCI blobs and one uncompressed image layer are supported by the
@@ -524,9 +564,11 @@ For a job that must run on a Mac node, the supported shapes are:
      scratch -- "$PWD/pi_host_upload.py"
    ```
 
-   Because the execution model is non-chroot, mounts are host-path symlinks and
-   the host-side path must already exist and be readable. This shape is honest
-   about what it is: a host process, not a container.
+   Because the execution model is non-chroot, writable mounts are host-path
+   symlinks and the host-side path must already exist and be readable. Add `:ro`
+   to a mount when the workload must not write back to the host; Macker then
+   enforces it with a read-only nullfs mount instead of trusting the process.
+   This shape is honest about what it is: a host process, not a container.
 3. **Stay on a Linux node.** If the workload is genuinely "a Linux base image
    plus an interpreter", scheduling it on a Linux node is cheaper than
    reconstructing a Darwin rootfs by hand.

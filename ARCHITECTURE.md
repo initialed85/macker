@@ -47,7 +47,7 @@ flowchart LR
     Run --> Resolve[Resolve local Darwin image]
     Resolve --> Unpack[OCI unpack]
     Unpack --> Config[Runtime token substitution]
-    Config --> Volumes[Install volume symlinks]
+    Config --> Volumes[Install volumes: symlink, or read-only nullfs mount]
     Volumes --> Network[Network setup]
     Network --> PF[PF port redirects]
     PF --> Metadata[Container metadata and state]
@@ -153,7 +153,7 @@ A high-level `run` performs these phases before launching the workload:
 6. Unpack the selected Darwin image into a fresh container rootfs.
 7. Merge image and run environment values, then substitute `____MACKER_*____`
    tokens in recognized regular UTF-8 configuration files.
-8. Install volume mappings as host-path symlinks.
+8. Install volume mappings: writable volumes as host-path symlinks, `:ro` volumes as read-only nullfs mounts.
 9. Install PF redirects for published ports.
 10. Persist metadata and launch the OCI process.
 
@@ -201,6 +201,35 @@ PF/network resources.
 The pause path does not replay or reconstruct the original invocation. A
 future restart operation will need persisted command/entrypoint configuration
 and separate desired-network metadata.
+
+### Read-only volumes and mount lifecycle
+
+`-v HOST:CONTAINER:ro` is enforced by the kernel rather than by a promise to the
+workload. Macker creates a real mount point under the container rootfs and mounts
+the host path with `mount_nullfs -o ro`, so `open(O_WRONLY)`, `creat` and `unlink`
+inside that path fail with `EROFS` for the launched workload and for every other
+process on the node while the mount exists. That is the closest Darwin equivalent
+of Kubernetes `hostPath` with `readOnly: true`: node-wide for the mount's
+lifetime, and removed when the container is torn down.
+
+The constraints follow from the mechanism, and Macker reports them instead of
+working around them:
+
+- Darwin nodes only; a Linux node rejects `:ro` rather than pretending to enforce
+  it.
+- Directory host paths only, because `mount_nullfs` cannot mount a single file
+  read-only. A file mount must drop `:ro`.
+- Root or passwordless sudo is required, as with PF and network operations.
+- `:ro` is opt-in. A plain `HOST:CONTAINER` stays a live writable symlink, and
+  third fields other than `ro` (including `:rw`) are rejected.
+
+The requested shape is persisted in `volumes` and the live mounts in
+`mounted_volumes`. Unmounting happens on workload exit, `macker stop`,
+`macker rm`, failed run setup, and reconciliation by `macker ps`/`macker inspect`
+when a detached workload was killed externally; a busy unmount is reported rather
+than swallowed. `macker inspect --format json` publishes both lists with
+`read_only`, so a caller such as maclet can confirm the enforced state instead of
+assuming it.
 
 ## Networking and port publishing
 
@@ -408,7 +437,9 @@ invoking user. In particular, Macker does not provide:
 - Linux namespaces, cgroups, capabilities, seccomp, or overlayfs;
 - per-process network namespaces or enforced Pod IP binding;
 - CPU, memory, or process-count limits;
-- isolated mounts for volumes (volumes are live symlinks);
+- isolated mounts for writable volumes (they are live symlinks); `:ro` volumes are
+  node-wide read-only nullfs mounts for the mount's lifetime, not per-process
+  sandboxing;
 - a security boundary through chroot;
 - automatic host secret filtering for build commands or workloads.
 

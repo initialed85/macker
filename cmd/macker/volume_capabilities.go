@@ -128,6 +128,24 @@ type volumeCapabilityReport struct {
 	NullfsBundleFound bool     `json:"nullfs_bundle_found"`
 	// NullfsBundlePath is the bundle that actually exists, empty when none does.
 	NullfsBundlePath  string `json:"nullfs_bundle_path,omitempty"`
+	// TypeNames are the filesystem type names Macker asks mount(8) for, in the order
+	// it tries them. Published because a node agent that keeps its own copy of this
+	// order goes silently stale the moment Macker changes it, and then refuses on a
+	// node that can mount.
+	TypeNames []string `json:"nullfs_type_names"`
+	// AttemptBinaries is the binaries Macker would consult for a read-only mount, in
+	// resolution order, absolute paths first and the bare name through $PATH last.
+	// It is published on a refused node as well as a granted one, because the refusal
+	// is where a caller most needs to know what was looked at. Nothing is attempted
+	// while ReadOnlySupported is false.
+	AttemptBinaries []string `json:"mount_attempt_binaries"`
+	// ResolvedHelper is the first entry of AttemptBinaries, empty when nothing
+	// resolved. It is always present so a caller can tell "resolved to nothing" apart
+	// from a field it did not receive.
+	ResolvedHelper string `json:"resolved_helper"`
+	// HelperOverride is the MACKER_MOUNT_NULLFS value when an operator named a helper,
+	// empty otherwise. It replaces the candidate order rather than joining it.
+	HelperOverride string `json:"helper_override,omitempty"`
 	WritableMechanism string `json:"writable_mechanism"`
 	Reason            string `json:"reason"`
 	// Guidance is the operator checklist. It is kept separate from Reason because
@@ -241,7 +259,21 @@ func volumeCapabilities(hostOS, hostArch string) volumeCapabilityReport {
 	// Mount helpers are only consulted on Darwin: listing /bin/mount on a Linux
 	// node would read as a capability the node cannot use.
 	if hostOS == "darwin" {
-		report.Helpers = append(resolveHelper(mountNullfsCandidatePaths, "mount_nullfs"), resolveHelper(mountHelperCandidatePaths, "mount")...)
+		found := append(resolveHelper(mountNullfsCandidatePaths, "mount_nullfs"), resolveHelper(mountHelperCandidatePaths, "mount")...)
+		report.Helpers = found
+		// maclet's `readOnlyNullfsHelpers` list was a second copy of this order, which
+		// is how an OS reading goes stale without anybody noticing. The order is
+		// published here instead, including on a node that refuses.
+		report.TypeNames = append([]string(nil), nullfsTypeNames...)
+		if configured := os.Getenv("MACKER_MOUNT_NULLFS"); configured != "" {
+			report.HelperOverride = configured
+			report.AttemptBinaries = []string{configured}
+		} else {
+			report.AttemptBinaries = append([]string(nil), found...)
+		}
+		if len(report.AttemptBinaries) > 0 {
+			report.ResolvedHelper = report.AttemptBinaries[0]
+		}
 	}
 	if blockage := readOnlyMountBlockage(hostOS); blockage != "" {
 		report.Reason = blockage
@@ -475,6 +507,23 @@ func renderVolumeCapabilities(report volumeCapabilityReport) string {
 	}
 	if len(report.MountForms) > 0 {
 		fmt.Fprintf(&out, "mount forms tried: %s\n", strings.Join(report.MountForms, " | "))
+	}
+	if report.HostOS == "darwin" {
+		if len(report.TypeNames) > 0 {
+			fmt.Fprintf(&out, "type names asked for, in order: %s\n", strings.Join(report.TypeNames, " then "))
+		}
+		if len(report.AttemptBinaries) > 0 {
+			fmt.Fprintf(&out, "helper resolution order: %s\n", strings.Join(report.AttemptBinaries, " then "))
+			if !report.ReadOnlySupported {
+				// Without this line a reader can take an ordered binary list for a plan.
+				out.WriteString("helper resolution order is what would be consulted, not what was run: nothing is attempted while read_only_supported is false\n")
+			}
+		} else {
+			out.WriteString("helper resolution order: nothing resolved, no candidate helper or mount binary was found\n")
+		}
+		if report.HelperOverride != "" {
+			fmt.Fprintf(&out, "helper override: MACKER_MOUNT_NULLFS=%s replaces the candidate order above\n", report.HelperOverride)
+		}
 	}
 	if report.Probed {
 		fmt.Fprintf(&out, "probe status: %s\n", report.ProbeStatus)

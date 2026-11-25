@@ -450,7 +450,22 @@ The first line is a stable marker — `read-only volumes: supported` or
 `probe_status`, the `probe` record (`status`,
 `mount_form`, `mount_point`,
 `mount_error`, `write_error`, `unmount_error`, `unmount_attempts`), the helpers
-resolved, the mount forms that would run, the reason, and `guidance`. `probe_status` is the machine-readable
+resolved (`helpers`), the mount forms that would run (`mount_forms`), the reason, and
+`guidance`.
+
+The helper resolution is published rather than duplicated, and these keys exist on a
+refusing node too, because that is the answer a node agent reads: `search_paths` is
+every path Macker looks at, `nullfs_type_names` is the type names Macker asks `mount(8)`
+for and the order it asks them in (`nullfs` then `null`), `mount_attempt_binaries` is
+the binaries Macker would exec in resolution order - absolute paths first, the bare name
+through `$PATH` last - `resolved_helper` is the first of those or an empty string when
+nothing resolved, and `helper_override` appears only when `MACKER_MOUNT_NULLFS` names a
+helper, in which case it replaces that order instead of joining it. A node agent that
+keeps its own copy of this list goes stale without anyone noticing: Macker changes the
+order, the agent does not, and the agent then refuses on a node that can mount. Nothing
+is attempted while `read_only_supported` is false, so `mount_attempt_binaries` is what
+would be consulted, not a plan being carried out - the report says so in its own text
+line when the verdict is a refusal. `probe_status` is the machine-readable
 verdict a node agent should switch on: `not_requested` (no `--probe`),
 `not_attempted_os` (this OS blocks the mount, so no command ran),
 `mount_not_attempted_privilege` (nobody was allowed to try, which says nothing

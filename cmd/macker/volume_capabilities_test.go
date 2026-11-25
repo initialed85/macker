@@ -714,3 +714,75 @@ func TestNullfsBundleTypeNameNamesTheTypeMountEightNeeds(t *testing.T) {
 		t.Fatalf("guidance = %q, want the helper name that bundle ships", guidance)
 	}
 }
+
+// maclet's node agent used to hold its own list of nullfs helper candidates, which
+// is how an OS reading goes stale without anyone noticing: Macker changes the order,
+// the agent does not, and the agent then refuses on a node that can mount. The report
+// publishes the order instead, so this test pins the published order to the order the
+// mount path would really use.
+func TestVolumeCapabilitiesPublishesTheHelperResolutionOrderItActuallyUses(t *testing.T) {
+	t.Setenv("MACKER_MOUNT_NULLFS", "")
+
+	report := volumeCapabilities("darwin", "arm64")
+
+	if got, want := strings.Join(report.TypeNames, " "), strings.Join(nullfsTypeNames, " "); got != want {
+		t.Errorf("nullfs_type_names = %q, want the order mount(8) is asked in: %q", got, want)
+	}
+
+	attempts, err := nullfsMountAttempts("HOST", "CONTAINER")
+	if err != nil {
+		t.Fatalf("nullfsMountAttempts on a node with a mount binary: %v", err)
+	}
+	var reallyUsed []string
+	for _, attempt := range attempts {
+		if len(reallyUsed) > 0 && reallyUsed[len(reallyUsed)-1] == attempt.Binary {
+			continue
+		}
+		reallyUsed = append(reallyUsed, attempt.Binary)
+	}
+	if got, want := strings.Join(report.AttemptBinaries, " "), strings.Join(reallyUsed, " "); got != want {
+		t.Errorf("mount_attempt_binaries = %q, want the binaries Macker would exec in order: %q", got, want)
+	}
+	if len(report.AttemptBinaries) > 0 && report.ResolvedHelper != report.AttemptBinaries[0] {
+		t.Errorf("resolved_helper = %q, want the first entry of mount_attempt_binaries (%q)", report.ResolvedHelper, report.AttemptBinaries[0])
+	}
+
+	// The point of publishing this on a refusing node is that a node agent reads the
+	// report exactly when the answer is no, so the keys have to survive a refusal.
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal the darwin report: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &keys); err != nil {
+		t.Fatalf("unmarshal the darwin report: %v", err)
+	}
+	for _, key := range []string{"nullfs_type_names", "mount_attempt_binaries", "resolved_helper", "search_paths"} {
+		if _, ok := keys[key]; !ok {
+			t.Errorf("a refusing darwin node reports no %q, so a node agent cannot read the resolution out of the answer it is given", key)
+		}
+	}
+
+	text := renderVolumeCapabilities(report)
+	if !strings.Contains(text, "helper resolution order:") {
+		t.Fatalf("report text = %q, want the resolution order spelled out for a human reader", text)
+	}
+	if !report.ReadOnlySupported && !strings.Contains(text, "not what was run") {
+		t.Errorf("report text = %q, want a refusal to say the order is what would be consulted rather than a plan being carried out", text)
+	}
+
+	// An operator-named helper replaces the candidate order rather than joining it,
+	// and a caller has to be able to see that happened.
+	const named = "/usr/local/bin/entitled-mount_nullfs"
+	t.Setenv("MACKER_MOUNT_NULLFS", named)
+	overridden := volumeCapabilities("darwin", "arm64")
+	if got, want := strings.Join(overridden.AttemptBinaries, " "), named; got != want {
+		t.Errorf("mount_attempt_binaries with MACKER_MOUNT_NULLFS set = %q, want only the named helper %q", got, want)
+	}
+	if overridden.HelperOverride != named || overridden.ResolvedHelper != named {
+		t.Errorf("override fields = %q and %q, want both to name %q", overridden.HelperOverride, overridden.ResolvedHelper, named)
+	}
+	if !strings.Contains(renderVolumeCapabilities(overridden), "replaces the candidate order") {
+		t.Errorf("report text = %q, want it to say the override replaced the candidate order rather than adding to it", renderVolumeCapabilities(overridden))
+	}
+}

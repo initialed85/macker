@@ -496,6 +496,10 @@ For this mode:
   on `probe_status` rather than reading the reason as prose: a probe that could not
   run because nobody was allowed to mount (`mount_not_attempted_privilege`) is not
   the same answer as a kernel that refused the filesystem type (`mount_refused`).
+  `reason` is kept short because maclet embeds it in a Pod status - `kubectl describe
+  pod` shows macker's wording - and a remedy that cannot work on that OS must not
+  appear there. The node operator's checklist is `guidance`, which belongs in node
+  logs instead.
 
 ## Isolation and trust model
 

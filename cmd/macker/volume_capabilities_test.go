@@ -36,24 +36,37 @@ func restrictMountSearch(t *testing.T, nullfsHelpers, mountHelpers []string) {
 	t.Setenv("PATH", "/nonexistent")
 }
 
-func TestReadOnlyMountBlockageNamesBundleAndOverride(t *testing.T) {
+// TestReadOnlyMountBlockageStaysShortAndMakesNoPromise states the contract maclet
+// asked for: maclet copies this text into a Pod's status, so `kubectl describe pod`
+// shows it, and a remedy that cannot work on this OS must not appear in it.
+func TestReadOnlyMountBlockageStaysShortAndMakesNoPromise(t *testing.T) {
 	useNullfsBundle(t, false)
 	t.Setenv("MACKER_MOUNT_NULLFS", "")
 	blockage := readOnlyMountBlockage("darwin")
 	for _, want := range []string{
 		"no null filesystem bundle",
 		nullfsBundlePath,
-		"mount(2)",
-		// The gate Apple added for this Darwin generation, named exactly so a
-		// reader can check it against xnu's bsd/miscfs/nullfs/null_vfsops.c.
-		"com.apple.private.nullfs_allow",
-		"no superuser fallback",
-		"MACKER_MOUNT_NULLFS",
-		"run this workload without :ro",
+		"no mount_nullfs exists",
+		"does not register the null filesystem",
+		"Run this workload without :ro",
 	} {
 		if !strings.Contains(blockage, want) {
 			t.Fatalf("blockage = %q, want it to contain %q", blockage, want)
 		}
+	}
+	for _, forbidden := range []string{
+		// The unreachable override route and the entitlement discussion belong in
+		// guidance, not in a Pod status a user reads.
+		"MACKER_MOUNT_NULLFS",
+		"com.apple.private.nullfs_allow",
+		"macker volumes --probe",
+	} {
+		if strings.Contains(blockage, forbidden) {
+			t.Fatalf("blockage = %q, want it to stay out of %q", blockage, forbidden)
+		}
+	}
+	if length := len([]rune(blockage)); length > 450 {
+		t.Fatalf("blockage is %d characters, want under 450 because a node agent puts it in a Pod status: %q", length, blockage)
 	}
 
 	useNullfsBundle(t, true)
@@ -66,6 +79,49 @@ func TestReadOnlyMountBlockageNamesBundleAndOverride(t *testing.T) {
 	t.Setenv("MACKER_MOUNT_NULLFS", "/opt/local/bin/mount_null_probe")
 	if got := readOnlyMountBlockage("darwin"); got != "" {
 		t.Fatalf("blockage = %q, want an explicit helper override to be trusted to attempt the mount", got)
+	}
+}
+
+// TestReadOnlyMountGuidanceCarriesTheOperatorChecklist keeps the long diagnosis
+// available where a node operator will actually read it: `macker volumes`.
+func TestReadOnlyMountGuidanceCarriesTheOperatorChecklist(t *testing.T) {
+	useNullfsBundle(t, false)
+	t.Setenv("MACKER_MOUNT_NULLFS", "")
+	guidance := readOnlyMountGuidance("darwin")
+	for _, want := range []string{
+		// Named exactly so a reader can check it against xnu's
+		// bsd/miscfs/nullfs/null_vfsops.c.
+		"com.apple.private.nullfs_allow",
+		"no superuser fallback",
+		"ENODEV",
+		"MACKER_MOUNT_NULLFS",
+		"macker volumes --probe",
+		"ls -l /sbin/mount_nullfs",
+		nullfsBundlePath,
+	} {
+		if !strings.Contains(guidance, want) {
+			t.Fatalf("guidance = %q, want it to contain %q", guidance, want)
+		}
+	}
+
+	if got := readOnlyMountGuidance("linux"); !strings.Contains(got, "Darwin") || !strings.Contains(got, "MACKER_MOUNT_NULLFS") {
+		t.Fatalf("guidance = %q, want it to name the platform requirement and the override route", got)
+	}
+
+	useNullfsBundle(t, true)
+	if got := readOnlyMountGuidance("darwin"); !strings.Contains(got, "the null filesystem bundle exists") || !strings.Contains(got, "macker volumes --probe") {
+		t.Fatalf("guidance = %q, want a node that has the bundle to get the confirmation commands rather than the macOS 26 story", got)
+	}
+
+	// The report carries both, so a caller can put one in a Pod status and log the
+	// other on the node.
+	report := volumeCapabilities("darwin", "arm64")
+	if report.Guidance == "" || report.Reason == "" {
+		t.Fatalf("report = %+v, want both a short reason and operator guidance", report)
+	}
+	text := renderVolumeCapabilities(report)
+	if !strings.Contains(text, "guidance: "+report.Guidance) {
+		t.Fatalf("rendered report = %q, want the guidance line", text)
 	}
 }
 

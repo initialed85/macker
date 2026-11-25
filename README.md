@@ -449,14 +449,24 @@ The first line is a stable marker — `read-only volumes: supported` or
 `nullfs_bundle_found`, `probed`, `probe_status`, the `probe` record (`status`,
 `mount_form`, `mount_point`,
 `mount_error`, `write_error`, `unmount_error`), the helpers resolved, the mount
-forms that would run, and the reason. `probe_status` is the machine-readable
+forms that would run, the reason, and `guidance`. `probe_status` is the machine-readable
 verdict a node agent should switch on: `not_requested` (no `--probe`),
 `not_attempted_os` (this OS blocks the mount, so no command ran),
 `mount_not_attempted_privilege` (nobody was allowed to try, which says nothing
 about the kernel), `helper_unavailable`, `mount_refused` (the kernel said no),
 `write_accepted` (a mount happened and it did not enforce read-only),
 `unmount_failed` (read-only was enforced and the mount is still live, with the
-command to release it in `reason`), and `enforced`. Without `--probe` a `supported` verdict means
+command to release it in `reason`), and `enforced`.
+
+`reason` is deliberately the short field. maclet copies it into a Pod's status, so
+`kubectl describe pod` on a darwin node shows macker's wording, and a remedy that
+cannot work on that OS must not appear there. On macOS 26 the refusal names the
+missing bundle, says the kernel registers no null filesystem, and tells the reader
+to run the workload without `:ro` - nothing more. The node operator's checklist
+lives in `guidance` instead: `ls -l /sbin/mount_nullfs`,
+`sudo /sbin/mount -t null -o ro SOURCE TARGET`, the `MACKER_MOUNT_NULLFS` and
+`MACKER_UMOUNT` overrides, the `com.apple.private.nullfs_allow` gate in Apple's
+source, and `macker volumes --probe`. Without `--probe` a `supported` verdict means
 "the helper and the filesystem bundle are present", not "the kernel enforced it", so
 a node agent that gates admission on this should use `--probe`. The probe mounts a
 temporary directory read-only over another temporary directory, writes a file inside

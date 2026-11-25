@@ -39,6 +39,12 @@ func nullfsBundleFound() bool {
 // exercise mount plumbing without a Darwin kernel. The explicit helper override
 // is exempt from the bundle check because a helper that calls mount(2) with the
 // null filesystem type does not need mount(8)'s bundle.
+//
+// This text travels further than the terminal. maclet copies it into a Pod's
+// status, so `kubectl describe pod` on a darwin node reads it, which means it
+// stays short and states no remedy that cannot work on the OS it is describing.
+// The long diagnostics live in readOnlyMountGuidance, which only `macker volumes`
+// prints.
 func readOnlyMountBlockage(hostOS string) string {
 	if hostOS != "darwin" {
 		if nullfsAvailable() {
@@ -52,7 +58,22 @@ func readOnlyMountBlockage(hostOS string) string {
 	if nullfsBundleFound() {
 		return ""
 	}
-	return fmt.Sprintf("this macOS has no null filesystem bundle at %s, so mount(8) has no helper for the null filesystem type and no mount_nullfs exists. Apple's own source for this Darwin generation still carries nullfs, but its mount entry point requires the private entitlement com.apple.private.nullfs_allow and has no superuser fallback, so a helper needs that entitlement as well as root - and on macOS 26.6.2 a calibrated mount(2) probe (devfs mounts through the same call form, apfs and hfs draw EINVAL for a bogus spec) returns ENODEV for the type null, the same class as a made-up filesystem name, so the built kernel does not register the vfs at all and the entitlement route is moot. Run `macker volumes --probe` on the node for a verdict from a mount the kernel accepted and a write it refused, point MACKER_MOUNT_NULLFS at a helper that calls mount(2) with the null filesystem type if this OS has one, or run this workload without :ro", nullfsBundlePath)
+	return fmt.Sprintf("this macOS has no null filesystem bundle at %s, so mount(8) has no helper for the null filesystem type and no mount_nullfs exists; a calibrated mount(2) probe on macOS 26.6.2 shows this kernel does not register the null filesystem at all, so no helper can mount it here. Run this workload without :ro", nullfsBundlePath)
+}
+
+// readOnlyMountGuidance is the operator-facing diagnosis: what to check on the
+// node, what the OS actually does, and which overrides exist. It is deliberately
+// kept out of the refusal text a node agent puts in a Pod status, because a
+// Pending Pod is not where a node operator's checklist belongs and because an
+// unreachable remedy read as advice costs someone an hour.
+func readOnlyMountGuidance(hostOS string) string {
+	if hostOS != "darwin" {
+		return fmt.Sprintf("a Darwin node is required for a read-only volume; on this host Macker refuses :ro rather than approximating it with a permission change or a symlink. Check the mount helpers with ls -l /sbin/mount_nullfs, or name one with MACKER_MOUNT_NULLFS and its partner MACKER_UMOUNT")
+	}
+	if nullfsBundleFound() {
+		return fmt.Sprintf("the null filesystem bundle exists at %s; confirm the mount helpers with ls -l /sbin/mount_nullfs and `sudo /sbin/mount -t null -o ro SOURCE TARGET`, or name them with MACKER_MOUNT_NULLFS and MACKER_UMOUNT. `macker volumes --probe` answers with a mount this kernel accepted and a write it refused", nullfsBundlePath)
+	}
+	return fmt.Sprintf("Apple's source for this Darwin generation still carries nullfs, but its mount entry point requires the private entitlement com.apple.private.nullfs_allow and has no superuser fallback, so a helper would need that entitlement as well as root - and a calibrated mount(2) probe on macOS 26.6.2 (devfs mounts through the same call form, apfs and hfs draw EINVAL for a bogus spec) returns ENODEV for the type null, the same class a made-up filesystem name draws, so the built kernel registers no nullfs vfs and the entitlement route is moot. Check with ls -l /sbin/mount_nullfs, ls -d %s and `sudo /sbin/mount -t null -o ro SOURCE TARGET`; MACKER_MOUNT_NULLFS names a helper that calls mount(2) directly and is exempt from the bundle check, which is the route to test if a future OS registers the filesystem again; `macker volumes --probe` reports a verdict from a mount the kernel accepted and a write it refused", nullfsBundlePath)
 }
 
 // volumeCapabilityReport answers, for a caller such as a node agent, whether a
@@ -69,6 +90,10 @@ type volumeCapabilityReport struct {
 	NullfsBundleFound bool     `json:"nullfs_bundle_found"`
 	WritableMechanism string   `json:"writable_mechanism"`
 	Reason            string   `json:"reason"`
+	// Guidance is the operator checklist. It is kept separate from Reason because
+	// a node agent puts Reason in a Pod status, and a Pending Pod is not where a
+	// node operator's checklist belongs.
+	Guidance string `json:"guidance"`
 	// Probe is only present when the command was asked to prove the capability
 	// by mounting something, which is the only answer that cannot be a guess.
 	Probed      bool              `json:"probed"`
@@ -159,6 +184,7 @@ func volumeCapabilities(hostOS, hostArch string) volumeCapabilityReport {
 		MountForms:        []string{},
 		SearchPaths:       append(append([]string{}, mountNullfsCandidatePaths...), mountHelperCandidatePaths...),
 		NullfsBundle:      nullfsBundlePath,
+		Guidance:          readOnlyMountGuidance(hostOS),
 		WritableMechanism: "live symlink to the host path, no mount required",
 	}
 	// Mount helpers are only consulted on Darwin: listing /bin/mount on a Linux
@@ -370,6 +396,7 @@ func renderVolumeCapabilities(report volumeCapabilityReport) string {
 	}
 	fmt.Fprintf(&out, "writable volumes: %s\n", report.WritableMechanism)
 	fmt.Fprintf(&out, "reason: %s\n", report.Reason)
+	fmt.Fprintf(&out, "guidance: %s\n", report.Guidance)
 	out.WriteString("overrides: MACKER_MOUNT_NULLFS, MACKER_UMOUNT\n")
 	out.WriteString("forms: macker volumes | macker volumes --probe\n")
 	return out.String()

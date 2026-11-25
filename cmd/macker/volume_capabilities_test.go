@@ -105,8 +105,12 @@ func TestReadOnlyMountGuidanceCarriesTheOperatorChecklist(t *testing.T) {
 		"registered under the type name nullfs, not null",
 		"EPERM for nullfs",
 		// The two traps that produced the wrong conclusion the first time this was
-		// measured on this node.
-		"errno 19 on Darwin is ENOTSUP",
+		// measured on this node. The first one names the errno correctly because an
+		// earlier revision of this text called 19 ENOTSUP on Darwin, which is false:
+		// xnu's errno.h has ENODEV 19 and ENOTSUP 45.
+		"errno 19 is ENODEV on both Darwin and Linux",
+		"ENOTSUP 45",
+		"null is Linux's name for this filesystem while nullfs is Darwin's",
 		"`sysctl vfs.generic` is not the registry",
 		"MACKER_MOUNT_NULLFS",
 		"macker volumes --probe",

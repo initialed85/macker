@@ -472,10 +472,11 @@ read-only.
 `reason` is deliberately the short field. maclet copies it into a Pod's status, so
 `kubectl describe pod` on a darwin node shows macker's wording, and a remedy that
 cannot work on that OS must not appear there. On macOS 26 the refusal names the
-missing bundle, says the kernel registers no null filesystem, and tells the reader
+missing bundle, says `mount(2)` as root draws `EPERM` for the type `nullfs` because
+Apple gates that entry point behind a private entitlement, and tells the reader
 to run the workload without `:ro` - nothing more. The node operator's checklist
 lives in `guidance` instead: `ls -l /sbin/mount_nullfs`,
-`sudo /sbin/mount -t null -o ro SOURCE TARGET`, the `MACKER_MOUNT_NULLFS` and
+`sudo /sbin/mount -t nullfs -o ro SOURCE TARGET`, the `MACKER_MOUNT_NULLFS` and
 `MACKER_UMOUNT` overrides, the `com.apple.private.nullfs_allow` gate in Apple's
 source, and `macker volumes --probe`. Without `--probe` a `supported` verdict means
 "the helper and the filesystem bundle are present", not "the kernel enforced it", so
@@ -499,8 +500,13 @@ policy-gated rather than absent, and the gate is one a third-party helper cannot
 satisfy. `nullfs` draws `EPERM` even with no mount data passed at all, so the refusal is
 at the vfs entry point and not an artefact of a malformed spec. Four traps cost this
 conclusion being wrong here once and are worth knowing
-before re-measuring: errno 19 on Darwin is `ENOTSUP`, "operation not supported by
-device", not `ENODEV`, "no such device"; `sysctl vfs.generic` is not the registry -
+before re-measuring: errno 19 is `ENODEV` on **both** Darwin and Linux, and Apple's own
+description of `ENODEV` reads "operation not supported by device", which is exactly why
+it is so easy to mistake for `ENOTSUP` - xnu's `bsd/sys/errno.h` numbers `ENODEV` 19 and
+`ENOTSUP` 45, Go's darwin table agrees with `ENODEV = 0x13` and `ENOTSUP = 0x2d`, and
+Linux keeps `ENODEV` 19 but numbers `ENOTSUP` 95. So a 19 says nothing is registered under
+the name asked for, never that the build lacks the filesystem, and `null` is Linux's name
+here while `nullfs` is Darwin's; `sysctl vfs.generic` is not the registry -
 it lists `apfs autofs hfs lifs nfs` on this node and omits `devfs`, which mounts fine,
 so a missing oid proves nothing; the mount table only ever reports the resolved path, so
 comparing a `statfs` `Mntonname` against the `/tmp/...` you passed answers "not mounted"
@@ -662,6 +668,16 @@ Darwin/amd64 release is built with Go 1.22.12 so it remains compatible with
 macOS Catalina; both artifacts include a tarball and SHA-256 checksum. A
 GitHub release is created for pushes to `master` and manual runs.
 Pull requests run the checks and build but do not create releases.
+
+Replacing `macker` on a Darwin node is not a `cp` over the running name. Go emits a
+linker-signed Mach-O, and rewriting the pages of a Mach-O that launchd is still keeping
+alive makes the kernel `SIGKILL` every later exec of that name - the crash reports read
+`termination namespace CODESIGNING, code 2, "Invalid Page"`. Install it as a replace
+instead: build to a sibling name, re-sign it (`codesign -f -s - macker.new`), prove it
+(`codesign -v macker.new`), `mv` it over the old name, and only then restart whatever
+launchd job execs it. maclet found this on icarus-2 by replacing their own binary four
+times in one evening and taking the node `NotReady` for ten minutes, and the rule applies
+unchanged to this binary.
 
 ## Deliberate limitations
 

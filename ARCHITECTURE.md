@@ -236,8 +236,8 @@ working around them:
   | `devfs` (control) | mounted, then released |
   | `apfs`, `hfs`, `autofs`, `lifs` | `EINVAL` - registered, bad spec |
   | `nfs` | errno 75 - registered, userspace data version rejected |
-  | `bogusxyz` | errno 19 |
-  | `null` | errno 19, byte-for-byte the answer a made-up name draws |
+  | `bogusxyz` | `ENODEV` - 19 |
+  | `null` | `ENODEV` - 19, byte-for-byte the answer a made-up name draws |
   | `nullfs` | `EPERM` - 1, three runs out of three |
 
   `nullfs` is the only name in that table that draws a refusal other than "no such
@@ -260,12 +260,18 @@ working around them:
   looks for `null.fs/Contents/Resources/mount_null`, each exiting 72. That is why Macker
   checks both bundle names and asks for both type names, `nullfs` first.
 - Four measurement traps that produced a wrong conclusion here once, recorded
-  because all of them are easy to fall into again. First, **errno 19 on Darwin is
-  `ENOTSUP`, "operation not supported by device", not `ENODEV`, "no such device"**
-  (Linux numbers them the other way round); a probe that prints 19 found an
-  unregistered *name*, and that is exactly how "the kernel registers no nullfs at all"
-  got reported here. It is false: `nullfs` is registered and answers `EPERM`. Second,
-  **`sysctl vfs.generic` is
+  because all of them are easy to fall into again. First, **the type name decides what
+  errno 19 means**: `null` is Linux's name for this filesystem, `nullfs` is Darwin's.
+  19 is `ENODEV` on both - Apple's own description of `ENODEV` reads "operation not
+  supported by device", which is exactly why it is so easy to mistake for `ENOTSUP`
+  (xnu's `bsd/sys/errno.h` numbers `ENODEV` 19 and `ENOTSUP` 45, Go's darwin table
+  agrees with `ENODEV = 0x13` and `ENOTSUP = 0x2d`, and Linux keeps `ENODEV` 19 but
+  numbers `ENOTSUP` 95). So a 19 says *nothing is registered under the name you asked
+  for*, never *this build has no such filesystem* - and asking for `null` on Darwin is
+  precisely how "the kernel registers no nullfs at all" got reported here. It is false:
+  `nullfs` is registered and answers `EPERM`. An earlier revision of this file called 19
+  `ENOTSUP` on Darwin; that was wrong, and maclet caught it from Go's errno table.
+  Second, **`sysctl vfs.generic` is
   not the filesystem registry**: on this node it lists `apfs autofs hfs lifs nfs` and
   omits `devfs`, which mounts and unmounts fine, so `sysctl vfs.generic.nullfs`
   reporting an unknown oid proves nothing. The mount(2) errno classes above are the

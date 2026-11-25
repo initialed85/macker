@@ -549,7 +549,11 @@ option. The mount is unmounted on exit, `stop`, `rm` and reconciliation after an
 external kill, and `macker inspect --format json` reports both the requested
 `volumes` and the live `mounted_volumes` with `read_only`, so a caller such as
 maclet can confirm the enforcement rather than assume it. `make test-ro` runs
-the create/modify/unlink acceptance test on a Mac node.
+the create/modify/unlink acceptance test on a Mac node. Before naming a build as a roll
+target, run `scripts/release-text-audit.sh REF`: it asks git whether that artifact publishes
+any claim already measured false on a node, and separately whether it carries the guidance
+strings an install check greps for. Those are different questions and a build can pass one
+and fail the other.
 
 ## Examples and tests
 

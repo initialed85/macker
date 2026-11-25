@@ -98,6 +98,14 @@ func TestReadOnlyMountGuidanceCarriesTheOperatorChecklist(t *testing.T) {
 	t.Setenv("MACKER_MOUNT_NULLFS", "")
 	guidance := readOnlyMountGuidance("darwin")
 	for _, want := range []string{
+		// Three entries below are not prose preferences. home-ops greps the installed
+		// binary's guidance for exactly these strings as a post-install acceptance check on
+		// icarus-2 - "errno 19 is ENODEV on both Darwin and Linux", "EPROGMISMATCH (75,
+		// which Linux numbers as EOVERFLOW) for nfs", and "the type name bindfs is not
+		// registered at all" - and that list is recorded in macgrubernetes f02a460, which
+		// pins build-41. Reword, requote or reflow any of the three and an install check
+		// that used to pass silently stops passing, so they change only together with
+		// home-ops and never inside an unrelated refactor.
 		// Named exactly so a reader can check it against xnu's
 		// bsd/miscfs/nullfs/null_vfsops.c.
 		"com.apple.private.nullfs_allow",

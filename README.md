@@ -328,13 +328,17 @@ Use `macker rm --force NAME` to stop and remove a running or paused container.
 `macker images` lists local images and `macker rmi IMAGE` removes an image layout;
 removing an image does not remove existing container rootfs directories.
 Writable volumes are live symlinks to host paths, not kernel mounts. A volume
-marked `HOST:CONTAINER:ro` is kernel-enforced instead: Macker creates a nullfs
-mount point under the container rootfs and mounts the host path with `ro`
-(`mount_nullfs -o ro`), so create, modify and unlink inside it fail with `EROFS`
-for the launched workload and for every other process on the node while the
-mount is live. That needs root or passwordless sudo, works only on Darwin nodes,
-and applies to directory host paths because `mount_nullfs` cannot mount a single
-file read-only. The mount is recorded in the container metadata as
+marked `HOST:CONTAINER:ro` is kernel-enforced *when the node can mount nullfs*:
+Macker creates a mount point under the container rootfs and mounts the host path
+read-only (`/sbin/mount_nullfs -o ro`, falling back to `mount -t null -o ro`), so
+create, modify and unlink inside it fail with `EROFS` for the launched workload
+and for every other process on the node while the mount is live. That mount path
+is not guaranteed to exist on a given macOS release - home-ops measured icarus-2
+(Darwin 25.6, macOS 26) and found no `mount_nullfs` there - so a node either
+provides a nullfs mount helper or a nullfs filesystem type for `mount(8)` and lets
+Macker run mount privileged, or `:ro` is refused and the container does not start.
+It works only on Darwin nodes, and applies to directory host paths because a
+nullfs mount cannot make a single file read-only. The mount is recorded in the container metadata as
 `mounted_volumes` and removed on workload exit, `stop`, `rm`, and the next
 `ps`/`inspect` after a container is killed externally; `inspect --format json`
 reports both the requested `volumes` and the currently `mounted_volumes` with
@@ -348,10 +352,10 @@ externally is cleaned up the next time it is observed by Macker.
 `-v HOST:CONTAINER` maps a host path into the container rootfs as a live
 symlink, which is what a non-chroot host process needs and nothing more.
 
-`-v HOST:CONTAINER:ro` is enforced instead of trusted. Macker mounts the host
-path read-only with `mount_nullfs -o ro` at a mount point inside the container
-rootfs, so the launched workload cannot create, modify or unlink anything under
-it:
+`-v HOST:CONTAINER:ro` is enforced instead of trusted, when the node has a nullfs
+mount path. Macker mounts the host path read-only with `mount_nullfs -o ro` (or
+`mount -t null -o ro`) at a mount point inside the container rootfs, so the
+launched workload cannot create, modify or unlink anything under it:
 
 ```sh
 ./bin/macker run --rm --name reader --entrypoint /bin/sh \
@@ -360,8 +364,8 @@ it:
 # touch: .../should-fail: Read-only file system
 ```
 
-Read-only volumes need a Darwin node, a directory host path (macOS
-`mount_nullfs` cannot mount a single file read-only), and root or passwordless
+Read-only volumes need a Darwin node, a directory host path (a nullfs mount
+cannot make a single file read-only), and root or passwordless
 sudo, exactly like PF port publishing and network setup. Macker resolves the
 helper by absolute path before it consults `$PATH` — `/sbin/mount_nullfs`, then
 `/usr/sbin/mount_nullfs` and `/usr/local/sbin/mount_nullfs`, then `$PATH`, and
@@ -370,7 +374,9 @@ node agent that launches Macker from a service context can have a `$PATH` that
 excludes `/sbin`, and that must not decide whether a node supports read-only
 mounts. `MACKER_MOUNT_NULLFS` and `MACKER_UMOUNT` name the helpers explicitly if
 a node keeps them elsewhere. A node with no usable helper reports every command
-it tried and how each was rejected. `:rw` and any other
+it tried and how each was rejected, and refuses the container rather than
+reporting a read-only volume it could not enforce — home-ops measured no
+`mount_nullfs` on icarus-2 (Darwin 25.6, macOS 26). `:rw` and any other
 third field are rejected with an error; writable is the default and needs no
 option. The mount is unmounted on exit, `stop`, `rm` and reconciliation after an
 external kill, and `macker inspect --format json` reports both the requested

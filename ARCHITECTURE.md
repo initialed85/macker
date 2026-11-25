@@ -205,21 +205,29 @@ and separate desired-network metadata.
 ### Read-only volumes and mount lifecycle
 
 `-v HOST:CONTAINER:ro` is enforced by the kernel rather than by a promise to the
-workload. Macker creates a real mount point under the container rootfs and mounts
-the host path with `mount_nullfs -o ro`, so `open(O_WRONLY)`, `creat` and `unlink`
-inside that path fail with `EROFS` for the launched workload and for every other
-process on the node while the mount exists. That is the closest Darwin equivalent
-of Kubernetes `hostPath` with `readOnly: true`: node-wide for the mount's
-lifetime, and removed when the container is torn down.
+workload, when the node has a nullfs mount path at all. Macker creates a real
+mount point under the container rootfs and mounts the host path read-only with
+`mount_nullfs -o ro`, falling back to `mount -t null -o ro`, so `open(O_WRONLY)`,
+`creat` and `unlink` inside that path fail with `EROFS` for the launched workload
+and for every other process on the node while the mount exists. That is the
+closest Darwin equivalent of Kubernetes `hostPath` with `readOnly: true`:
+node-wide for the mount's lifetime, and removed when the container is torn down.
 
 The constraints follow from the mechanism, and Macker reports them instead of
 working around them:
 
 - Darwin nodes only; a Linux node rejects `:ro` rather than pretending to enforce
   it.
-- Directory host paths only, because `mount_nullfs` cannot mount a single file
+- A usable nullfs mount path on that macOS release. home-ops measured icarus-2
+  (Darwin 25.6, macOS 26) and found no `mount_nullfs` helper, so a node needs
+  either that helper or a nullfs filesystem type usable by `mount(8)`; with
+  neither, Macker refuses `:ro` and the container never starts. The refusal is the
+  guarantee: Macker never reports a read-only volume it could not enforce.
+- Directory host paths only, because a nullfs mount cannot make a single file
   read-only. A file mount must drop `:ro`.
-- Root or passwordless sudo is required, as with PF and network operations.
+- Root or passwordless sudo is required, as with PF and network operations. A node
+  agent that drops privileges before exec, as maclet does, needs a narrow
+  passwordless rule for the mount and umount commands, or `:ro` is refused.
 - `:ro` is opt-in. A plain `HOST:CONTAINER` stays a live writable symlink, and
   third fields other than `ro` (including `:rw`) are rejected.
 

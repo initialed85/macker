@@ -234,6 +234,12 @@ working around them:
   passwordless rule for the mount and umount commands, or `:ro` is refused.
 - `:ro` is opt-in. A plain `HOST:CONTAINER` stays a live writable symlink, and
   third fields other than `ro` (including `:rw`) are rejected.
+- `:ro` is a guard against incidental writes, not a security boundary and not
+  confinement. It says: writes through that mount fail with `EROFS`. It does not
+  mean the workload cannot read the tree, cannot open the same host path directly
+  under its own host permissions, or is confined to the container rootfs. A
+  Darwin-native workload runs as a host process with host access, and Macker
+  makes no claim beyond the mount it actually created.
 
 The requested shape is persisted in `volumes` and the live mounts in
 `mounted_volumes`. Unmounting happens on workload exit, `macker stop`,

@@ -364,6 +364,13 @@ launched workload cannot create, modify or unlink anything under it:
 # touch: .../should-fail: Read-only file system
 ```
 
+That is the whole claim: writes through that mount fail with `EROFS`. It is a guard
+against incidental writes, not a security boundary and not confinement. `:ro` does
+not stop the workload reading the tree, does not stop it opening the same host path
+directly with its own host permissions, and does not confine it to the container
+rootfs — a Darwin-native workload runs as a host process with host access, and Macker
+does not claim more than the mount it created.
+
 Read-only volumes need a Darwin node, a directory host path (a nullfs mount
 cannot make a single file read-only), and root or passwordless
 sudo, exactly like PF port publishing and network setup. Macker resolves the

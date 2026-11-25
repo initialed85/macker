@@ -103,6 +103,31 @@ func TestVolumeCapabilitiesDarwinRefusesWhenTheNullFilesystemIsGone(t *testing.T
 	}
 }
 
+func TestRenderedReportQualifiesAHelperThatCannotMountNullOnDarwin(t *testing.T) {
+	useNullfsBundle(t, false)
+	helper, _ := fakeVolumeHelper(t, "mount_nullfs", "exit 0")
+	restrictMountSearch(t, []string{helper}, []string{"/nonexistent/mount"})
+	t.Setenv("MACKER_MOUNT_NULLFS", "")
+
+	// A Darwin node with no null filesystem bundle still has /sbin/mount, so the
+	// helper line has to say what the helper cannot do on this OS.
+	text := renderVolumeCapabilities(volumeCapabilities("darwin", "arm64"))
+	for _, want := range []string{
+		"mount helpers resolved: " + helper + " (found, but mount(8) needs ",
+		"to mount the null type, so a found helper proves nothing here)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("rendered report = %q, want it to contain %q", text, want)
+		}
+	}
+
+	useNullfsBundle(t, true)
+	qualified := renderVolumeCapabilities(volumeCapabilities("darwin", "arm64"))
+	if strings.Contains(qualified, "proves nothing here") {
+		t.Fatalf("rendered report = %q, want no warning when the null filesystem bundle exists", qualified)
+	}
+}
+
 func TestVolumeCapabilitiesDarwinReportsSupportedWithHelperAndBundle(t *testing.T) {
 	useNullfsBundle(t, true)
 	helper, _ := fakeVolumeHelper(t, "mount_nullfs", "exit 0")
@@ -219,6 +244,31 @@ func useReadOnlyProbeSeam(t *testing.T, run readOnlyProbeRun) {
 	readOnlyProbeRunner = func() readOnlyProbeRun { return run }
 }
 
+func TestReadOnlyProbeRunClassifiesEveryFailureMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		run        readOnlyProbeRun
+		wantStatus string
+	}{
+		{"enforced", readOnlyProbeRun{MountPoint: "/tmp/mnt", WriteError: "read-only file system"}, "enforced"},
+		{"kernel refused the mount", readOnlyProbeRun{MountPoint: "/tmp/mnt", MountError: "/sbin/mount -t null -o ro src dst: exit status 72"}, "mount_refused"},
+		{"no helper exists", readOnlyProbeRun{MountError: "no mount helper was found: tried /sbin/mount_nullfs, /sbin/mount"}, "helper_unavailable"},
+		{"nobody was allowed to try", readOnlyProbeRun{MountError: "mount src dst read-only: root or passwordless sudo is required"}, "mount_not_attempted_privilege"},
+		{"sudo wants a password", readOnlyProbeRun{MountError: "exit status 1: sudo: a password is required"}, "mount_not_attempted_privilege"},
+		{"mount accepted a write", readOnlyProbeRun{MountPoint: "/tmp/mnt"}, "write_accepted"},
+		{"mount could not be released", readOnlyProbeRun{MountPoint: "/tmp/mnt", WriteError: "read-only file system", UnmountError: "umount: /tmp/mnt: Resource busy"}, "unmount_failed"},
+	}
+	for _, tc := range cases {
+		status := tc.run.classify()
+		if status != tc.wantStatus {
+			t.Errorf("%s: classify() = %q, want %q", tc.name, status, tc.wantStatus)
+		}
+		if enforced := tc.run.enforced(); enforced != (tc.wantStatus == "enforced") {
+			t.Errorf("%s: enforced() = %t, want it to agree with the status %q", tc.name, enforced, tc.wantStatus)
+		}
+	}
+}
+
 func TestReadOnlyProbeRunVerdictAndReason(t *testing.T) {
 	mountForm := "/sbin/mount_nullfs -o ro /tmp/src /tmp/mnt"
 
@@ -299,6 +349,9 @@ func TestVolumeCapabilitiesWithProbeReportsWhatTheKernelAnswered(t *testing.T) {
 	if !strings.Contains(report.Mechanism, "proven on this node") {
 		t.Fatalf("mechanism = %q, want it to say the verdict was proven by a mount", report.Mechanism)
 	}
+	if report.ProbeStatus != "enforced" || report.Probe == nil || report.Probe.Status != "enforced" {
+		t.Fatalf("report = %+v, want probe_status enforced in the report and the probe record", report)
+	}
 
 	// A helper that exists is not a kernel that mounts: the same node reports
 	// refused once the probe says the mount was accepted but a write got through.
@@ -321,6 +374,21 @@ func TestVolumeCapabilitiesWithProbeReportsWhatTheKernelAnswered(t *testing.T) {
 	}
 	if !strings.Contains(blocked.Reason, "probe not attempted") || !strings.Contains(blocked.Reason, "no null filesystem bundle") {
 		t.Fatalf("reason = %q, want it to say the probe was skipped and why", blocked.Reason)
+	}
+	if blocked.ProbeStatus != "not_attempted_os" {
+		t.Fatalf("probe_status = %q, want not_attempted_os so a gate can tell an OS blockage from a kernel refusal", blocked.ProbeStatus)
+	}
+
+	// A node whose user cannot mount anything must not be read as a node whose
+	// kernel refused the mount.
+	useNullfsBundle(t, true)
+	useReadOnlyProbeSeam(t, readOnlyProbeRun{MountError: "mount src dst read-only: root or passwordless sudo is required"})
+	unprivileged := volumeCapabilitiesWithProbe("darwin", "arm64")
+	if unprivileged.ProbeStatus != "mount_not_attempted_privilege" {
+		t.Fatalf("probe_status = %q, want the privilege failure classified apart from a kernel refusal (report %+v)", unprivileged.ProbeStatus, unprivileged)
+	}
+	if unprivileged.ReadOnlySupported {
+		t.Fatalf("report = %+v, want an unprivileged probe to report refused", unprivileged)
 	}
 }
 
@@ -348,6 +416,12 @@ func TestVolumesCommandProbeFlagReportsTheProbeRecord(t *testing.T) {
 	if !report.Probed || report.Probe == nil || report.Probe.WriteError == "" {
 		t.Fatalf("report = %+v, want the probe record in the json output", report)
 	}
+	if report.ProbeStatus != "enforced" {
+		t.Fatalf("probe_status = %q, want enforced", report.ProbeStatus)
+	}
+	if !strings.Contains(encoded, `"probe_status": "enforced"`) || !strings.Contains(encoded, `"status": "enforced"`) {
+		t.Fatalf("json output = %q, want probe_status and the probe record's status visible to a machine", encoded)
+	}
 
 	table := captureStdout(t, func() {
 		if err := commandVolumes([]string{"--probe"}); err != nil {
@@ -357,6 +431,7 @@ func TestVolumesCommandProbeFlagReportsTheProbeRecord(t *testing.T) {
 	for _, want := range []string{
 		"read-only volumes: supported",
 		"verdict source: probed on this node",
+		"probe status: enforced",
 		"probe mount: /sbin/mount_nullfs -o ro src mnt",
 		"probe write inside the mount: refused with read-only file system",
 	} {
@@ -378,6 +453,9 @@ func TestVolumesCommandProbeFlagReportsTheProbeRecord(t *testing.T) {
 	}
 	if unprobed.Probed || unprobed.Probe != nil {
 		t.Fatalf("report = %+v, want probed false and no probe record without --probe", unprobed)
+	}
+	if unprobed.ProbeStatus != "not_requested" {
+		t.Fatalf("probe_status = %q, want not_requested when --probe was not passed", unprobed.ProbeStatus)
 	}
 }
 

@@ -424,24 +424,39 @@ verdict that cannot be a guess about a helper:
 ```sh
 ./bin/macker volumes
 # read-only volumes: refused
+# verdict source: reported without mounting anything; add --probe for proof
 # host: darwin/arm64
 # mechanism: none
 # nullfs bundle: /Library/Filesystems/null.fs (found: false)
-# mount helpers resolved: none (searched /sbin/mount_nullfs, ...)
+# mount helpers resolved: /sbin/mount (found, but mount(8) needs /Library/Filesystems/null.fs to mount the null type, so a found helper proves nothing here)
 # reason: this macOS has no null filesystem bundle at /Library/Filesystems/null.fs, ...
 
 ./bin/macker volumes --probe
-# read-only volumes: supported
-# verdict source: probed on this node (a mount the kernel accepted and a write it refused)
-# probe mount: /sbin/mount_nullfs -o ro <temporary source> <temporary mount point>
-# reason: probe mount ... enforced read-only: writing inside <mount point> failed with the kernel's read-only error, and the mount was released
+# read-only volumes: refused
+# verdict source: --probe was requested and no mount was attempted (see reason)
+# probe status: not_attempted_os
+# mechanism: none
+# reason: probe not attempted: this macOS has no null filesystem bundle at ...
 ```
+
+Those two outputs are measured on icarus-2 (macOS 26.6.2). On a node whose OS can
+mount null, the same `--probe` prints `read-only volumes: supported`,
+`probe status: enforced`, the mount form it ran, and
+`probe write inside the mount: refused with <the kernel's read-only error>`.
 
 The first line is a stable marker — `read-only volumes: supported` or
 `read-only volumes: refused` — and `--format json` reports `read_only_supported`,
-`nullfs_bundle_found`, `probed`, the `probe` record (`mount_form`, `mount_point`,
+`nullfs_bundle_found`, `probed`, `probe_status`, the `probe` record (`status`,
+`mount_form`, `mount_point`,
 `mount_error`, `write_error`, `unmount_error`), the helpers resolved, the mount
-forms that would run, and the reason. Without `--probe` a `supported` verdict means
+forms that would run, and the reason. `probe_status` is the machine-readable
+verdict a node agent should switch on: `not_requested` (no `--probe`),
+`not_attempted_os` (this OS blocks the mount, so no command ran),
+`mount_not_attempted_privilege` (nobody was allowed to try, which says nothing
+about the kernel), `helper_unavailable`, `mount_refused` (the kernel said no),
+`write_accepted` (a mount happened and it did not enforce read-only),
+`unmount_failed` (read-only was enforced and the mount is still live, with the
+command to release it in `reason`), and `enforced`. Without `--probe` a `supported` verdict means
 "the helper and the filesystem bundle are present", not "the kernel enforced it", so
 a node agent that gates admission on this should use `--probe`. The probe mounts a
 temporary directory read-only over another temporary directory, writes a file inside

@@ -492,7 +492,10 @@ For this mode:
   temporary mount the kernel accepted, a write inside it the kernel refused, and
   the mount released again. Without `--probe` the same command answers the
   capability question by inspecting helpers and the null filesystem bundle, which
-  can say "supported" on a node whose kernel would still refuse the mount.
+  can say "supported" on a node whose kernel would still refuse the mount. Switch
+  on `probe_status` rather than reading the reason as prose: a probe that could not
+  run because nobody was allowed to mount (`mount_not_attempted_privilege`) is not
+  the same answer as a kernel that refused the filesystem type (`mount_refused`).
 
 ## Isolation and trust model
 

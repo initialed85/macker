@@ -71,8 +71,9 @@ type volumeCapabilityReport struct {
 	Reason            string   `json:"reason"`
 	// Probe is only present when the command was asked to prove the capability
 	// by mounting something, which is the only answer that cannot be a guess.
-	Probed bool              `json:"probed"`
-	Probe  *readOnlyProbeRun `json:"probe,omitempty"`
+	Probed      bool              `json:"probed"`
+	ProbeStatus string            `json:"probe_status"`
+	Probe       *readOnlyProbeRun `json:"probe,omitempty"`
 }
 
 // readOnlyProbeRun is what actually happened when Macker mounted a throwaway
@@ -80,6 +81,7 @@ type volumeCapabilityReport struct {
 // capability: the mount was accepted, a write inside it was refused, and the
 // mount was released again.
 type readOnlyProbeRun struct {
+	Status       string `json:"status"`
 	MountForm    string `json:"mount_form,omitempty"`
 	MountPoint   string `json:"mount_point,omitempty"`
 	MountError   string `json:"mount_error,omitempty"`
@@ -87,11 +89,47 @@ type readOnlyProbeRun struct {
 	UnmountError string `json:"unmount_error,omitempty"`
 }
 
+// classify names the failure mode instead of leaving a caller to read the reason
+// line as prose. A node agent has to distinguish "this node's kernel refused the
+// mount" from "nobody was allowed to try", because the second one says nothing
+// about the node.
+func (p readOnlyProbeRun) classify() string {
+	switch {
+	case p.MountError != "" && strings.Contains(p.MountError, "no mount helper was found"):
+		return "helper_unavailable"
+	case p.MountError != "" && mountFailureIsPrivilege(p.MountError):
+		return "mount_not_attempted_privilege"
+	case p.MountError != "":
+		return "mount_refused"
+	case p.WriteError == "":
+		return "write_accepted"
+	case p.UnmountError != "":
+		return "unmount_failed"
+	default:
+		return "enforced"
+	}
+}
+
+// mountFailureIsPrivilege recognises the ways macOS refuses a mount attempt for
+// lack of privilege, as opposed to a kernel that refuses the filesystem type.
+func mountFailureIsPrivilege(failure string) bool {
+	for _, marker := range []string{
+		"root or passwordless sudo is required",
+		"a password is required",
+		"sudo:",
+	} {
+		if strings.Contains(failure, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // enforced reports whether the probe proved the guarantee macker sells: a write
 // inside a :ro volume fails. A mount that succeeds but still accepts writes is a
 // refusal, not a success.
 func (p readOnlyProbeRun) enforced() bool {
-	return p.MountError == "" && p.WriteError != "" && p.UnmountError == ""
+	return p.classify() == "enforced"
 }
 
 // reason explains a verdict in the terms a node operator has to act on.
@@ -117,6 +155,7 @@ func volumeCapabilities(hostOS, hostArch string) volumeCapabilityReport {
 		HostOS:            hostOS,
 		HostArch:          hostArch,
 		Mechanism:         "none",
+		ProbeStatus:       "not_requested",
 		MountForms:        []string{},
 		SearchPaths:       append(append([]string{}, mountNullfsCandidatePaths...), mountHelperCandidatePaths...),
 		NullfsBundle:      nullfsBundlePath,
@@ -222,11 +261,14 @@ func volumeCapabilitiesWithProbe(hostOS, hostArch string) volumeCapabilityReport
 	report := volumeCapabilities(hostOS, hostArch)
 	report.Probed = true
 	if blockage := readOnlyMountBlockage(hostOS); blockage != "" {
+		report.ProbeStatus = "not_attempted_os"
 		report.Reason = "probe not attempted: " + blockage
 		return report
 	}
 	probe := readOnlyProbeRunner()
+	probe.Status = probe.classify()
 	report.Probe = &probe
+	report.ProbeStatus = probe.Status
 	report.Reason = probe.reason()
 	if probe.enforced() {
 		report.ReadOnlySupported = true
@@ -269,48 +311,66 @@ func commandVolumes(args []string) error {
 	}
 	// The first line is a stable marker a node agent can grep for; the rest is
 	// for the human who has to fix the node.
+	fmt.Print(renderVolumeCapabilities(report))
+	return nil
+}
+
+// renderVolumeCapabilities turns a report into the human-readable form. It is
+// separate from the command so the wording can be tested for a Darwin node on a
+// Linux CI run.
+func renderVolumeCapabilities(report volumeCapabilityReport) string {
+	out := strings.Builder{}
 	if report.ReadOnlySupported {
-		fmt.Println("read-only volumes: supported")
+		out.WriteString("read-only volumes: supported\n")
 	} else {
-		fmt.Println("read-only volumes: refused")
+		out.WriteString("read-only volumes: refused\n")
 	}
 	if report.Probed {
 		if report.Probe != nil {
-			fmt.Println("verdict source: probed on this node (a mount the kernel accepted and a write it refused)")
+			out.WriteString("verdict source: probed on this node (a mount the kernel accepted and a write it refused)\n")
 		} else {
-			fmt.Println("verdict source: --probe was requested and no mount was attempted (see reason)")
+			out.WriteString("verdict source: --probe was requested and no mount was attempted (see reason)\n")
 		}
 	} else {
-		fmt.Println("verdict source: reported without mounting anything; add --probe for proof")
+		out.WriteString("verdict source: reported without mounting anything; add --probe for proof\n")
 	}
-	fmt.Printf("host: %s/%s\n", report.HostOS, report.HostArch)
-	fmt.Printf("mechanism: %s\n", report.Mechanism)
-	fmt.Printf("nullfs bundle: %s (found: %t)\n", report.NullfsBundle, report.NullfsBundleFound)
+	fmt.Fprintf(&out, "host: %s/%s\n", report.HostOS, report.HostArch)
+	fmt.Fprintf(&out, "mechanism: %s\n", report.Mechanism)
+	fmt.Fprintf(&out, "nullfs bundle: %s (found: %t)\n", report.NullfsBundle, report.NullfsBundleFound)
 	if len(report.Helpers) > 0 {
-		fmt.Printf("mount helpers resolved: %s\n", strings.Join(report.Helpers, ", "))
+		resolved := strings.Join(report.Helpers, ", ")
+		if report.HostOS == "darwin" && !report.NullfsBundleFound {
+			// Naming a helper that exists without saying what it cannot do is how a
+			// reader concludes a node can mount null. maclet flagged this line.
+			resolved += fmt.Sprintf(" (found, but mount(8) needs %s to mount the null type, so a found helper proves nothing here)", nullfsBundlePath)
+		}
+		fmt.Fprintf(&out, "mount helpers resolved: %s\n", resolved)
 	} else {
-		fmt.Printf("mount helpers resolved: none (searched %s)\n", strings.Join(report.SearchPaths, ", "))
+		fmt.Fprintf(&out, "mount helpers resolved: none (searched %s)\n", strings.Join(report.SearchPaths, ", "))
 	}
 	if len(report.MountForms) > 0 {
-		fmt.Printf("mount forms tried: %s\n", strings.Join(report.MountForms, " | "))
+		fmt.Fprintf(&out, "mount forms tried: %s\n", strings.Join(report.MountForms, " | "))
+	}
+	if report.Probed {
+		fmt.Fprintf(&out, "probe status: %s\n", report.ProbeStatus)
 	}
 	if report.Probe != nil {
 		if report.Probe.MountForm != "" {
-			fmt.Printf("probe mount: %s\n", report.Probe.MountForm)
+			fmt.Fprintf(&out, "probe mount: %s\n", report.Probe.MountForm)
 		}
 		if report.Probe.MountPoint != "" {
-			fmt.Printf("probe mount point: %s\n", report.Probe.MountPoint)
+			fmt.Fprintf(&out, "probe mount point: %s\n", report.Probe.MountPoint)
 		}
 		if report.Probe.WriteError != "" {
-			fmt.Printf("probe write inside the mount: refused with %s\n", report.Probe.WriteError)
+			fmt.Fprintf(&out, "probe write inside the mount: refused with %s\n", report.Probe.WriteError)
 		}
 		if report.Probe.UnmountError != "" {
-			fmt.Printf("probe unmount: %s\n", report.Probe.UnmountError)
+			fmt.Fprintf(&out, "probe unmount: %s\n", report.Probe.UnmountError)
 		}
 	}
-	fmt.Printf("writable volumes: %s\n", report.WritableMechanism)
-	fmt.Printf("reason: %s\n", report.Reason)
-	fmt.Println("overrides: MACKER_MOUNT_NULLFS, MACKER_UMOUNT")
-	fmt.Println("forms: macker volumes | macker volumes --probe")
-	return nil
+	fmt.Fprintf(&out, "writable volumes: %s\n", report.WritableMechanism)
+	fmt.Fprintf(&out, "reason: %s\n", report.Reason)
+	out.WriteString("overrides: MACKER_MOUNT_NULLFS, MACKER_UMOUNT\n")
+	out.WriteString("forms: macker volumes | macker volumes --probe\n")
+	return out.String()
 }

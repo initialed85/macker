@@ -423,3 +423,150 @@ func TestVolumeInspectionsEmptyList(t *testing.T) {
 		t.Fatalf("volumeInspections(nil) = %#v, want an empty list so JSON reports []", got)
 	}
 }
+
+// TestReadOnlyMountResolvesHelperWithoutSbinOnPath is maclet's measured failure
+// on icarus-2.local: maclet launches Macker from a service context whose PATH
+// does not include /sbin, and a mount helper looked up by name is then missing
+// on a node that has it. Absolute candidates must be resolved before $PATH.
+func TestReadOnlyMountResolvesHelperWithoutSbinOnPath(t *testing.T) {
+	helper, helperLog := fakeVolumeHelper(t, "mount_nullfs", "exit 0")
+	originalNullfs := mountNullfsCandidatePaths
+	originalMount := mountHelperCandidatePaths
+	defer func() {
+		mountNullfsCandidatePaths = originalNullfs
+		mountHelperCandidatePaths = originalMount
+	}()
+	// The helper exists at an absolute path only; $PATH cannot see it.
+	mountNullfsCandidatePaths = []string{helper}
+	mountHelperCandidatePaths = []string{"/nonexistent/mount"}
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("MACKER_TEST_ALLOW_NULLFS", "1")
+
+	rootfs := t.TempDir()
+	host := t.TempDir()
+	mount := volume{HostPath: host, ContainerPath: "/data", ReadOnly: true}
+	if err := installVolume(rootfs, mount); err != nil {
+		t.Fatalf("a helper reachable only by absolute path must still be used: %v", err)
+	}
+	want := []string{"-o", "ro", host, filepath.Join(rootfs, "data")}
+	if got := readHelperLog(t, helperLog); !reflect.DeepEqual(got, want) {
+		t.Fatalf("mount invocation = %q, want %q", got, want)
+	}
+}
+
+// TestReadOnlyMountFallsBackToMountWithNullFilesystemType covers a node whose
+// userland has no mount_nullfs helper but does have mount(8).
+func TestReadOnlyMountFallsBackToMountWithNullFilesystemType(t *testing.T) {
+	helper, helperLog := fakeVolumeHelper(t, "mount", "exit 0")
+	originalNullfs := mountNullfsCandidatePaths
+	originalMount := mountHelperCandidatePaths
+	defer func() {
+		mountNullfsCandidatePaths = originalNullfs
+		mountHelperCandidatePaths = originalMount
+	}()
+	mountNullfsCandidatePaths = []string{"/nonexistent/mount_nullfs", "/usr/sbin/mount_nullfs"}
+	mountHelperCandidatePaths = []string{helper}
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("MACKER_TEST_ALLOW_NULLFS", "1")
+
+	rootfs := t.TempDir()
+	host := t.TempDir()
+	mount := volume{HostPath: host, ContainerPath: "/data", ReadOnly: true}
+	if err := installVolume(rootfs, mount); err != nil {
+		t.Fatalf("mount(8) with the null filesystem type must be attempted: %v", err)
+	}
+	want := []string{"-t", "null", "-o", "ro", host, filepath.Join(rootfs, "data")}
+	if got := readHelperLog(t, helperLog); !reflect.DeepEqual(got, want) {
+		t.Fatalf("mount invocation = %q, want %q", got, want)
+	}
+}
+
+// TestReadOnlyMountNamesEveryHelperItTried: when nothing resolves, the error has
+// to tell an operator what was searched and what to run on the node, rather than
+// asserting that a utility ships with macOS.
+func TestReadOnlyMountNamesEveryHelperItTried(t *testing.T) {
+	originalNullfs := mountNullfsCandidatePaths
+	originalMount := mountHelperCandidatePaths
+	defer func() {
+		mountNullfsCandidatePaths = originalNullfs
+		mountHelperCandidatePaths = originalMount
+	}()
+	mountNullfsCandidatePaths = []string{"/sbin/mount_nullfs", "/usr/sbin/mount_nullfs"}
+	mountHelperCandidatePaths = []string{"/sbin/mount", "/usr/sbin/mount"}
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("MACKER_TEST_ALLOW_NULLFS", "1")
+
+	rootfs := t.TempDir()
+	err := installVolume(rootfs, volume{HostPath: t.TempDir(), ContainerPath: "/data", ReadOnly: true})
+	if err == nil {
+		t.Fatal("expected a failure when no mount helper exists")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"no mount helper was found",
+		"/sbin/mount_nullfs",
+		"LookPath(mount_nullfs)",
+		"/sbin/mount",
+		"LookPath(mount)",
+		"ls -l /sbin/mount_nullfs",
+		"sudo /sbin/mount -t null -o ro SOURCE TARGET",
+		"MACKER_MOUNT_NULLFS",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error = %q, want it to contain %q", message, want)
+		}
+	}
+}
+
+// TestReadOnlyMountReportsEveryAttemptItMade turns a failed mount into the list
+// of commands the node actually rejected, which is what separates a missing
+// helper from a missing sudo rule from a kernel without nullfs.
+func TestReadOnlyMountReportsEveryAttemptItMade(t *testing.T) {
+	helper, _ := fakeVolumeHelper(t, "mount_nullfs", "echo 'mount: null file system not supported' >&2; exit 1")
+	mountHelper, _ := fakeVolumeHelper(t, "mount", "echo 'mount: unknown file system type null' >&2; exit 1")
+	originalNullfs := mountNullfsCandidatePaths
+	originalMount := mountHelperCandidatePaths
+	defer func() {
+		mountNullfsCandidatePaths = originalNullfs
+		mountHelperCandidatePaths = originalMount
+	}()
+	mountNullfsCandidatePaths = []string{helper}
+	mountHelperCandidatePaths = []string{mountHelper}
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("MACKER_TEST_ALLOW_NULLFS", "1")
+
+	rootfs := t.TempDir()
+	host := t.TempDir()
+	target := filepath.Join(rootfs, "data")
+	err := installVolume(rootfs, volume{HostPath: host, ContainerPath: "/data", ReadOnly: true})
+	if err == nil {
+		t.Fatal("expected every failed mount attempt to fail the volume install")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		helper + " -o ro " + host + " " + target,
+		helper + " " + host + " " + target + " -o ro",
+		mountHelper + " -t null -o ro " + host + " " + target,
+		"null file system not supported",
+		"root or passwordless sudo",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error = %q, want it to contain %q", message, want)
+		}
+	}
+}
+
+func TestUmountBinaryResolvesAbsolutePathWithoutPathHelp(t *testing.T) {
+	helper, _ := fakeVolumeHelper(t, "umount", "exit 0")
+	original := umountCandidatePaths
+	defer func() { umountCandidatePaths = original }()
+	umountCandidatePaths = []string{"/nonexistent/umount", helper}
+	t.Setenv("PATH", "/nonexistent")
+	if got := umountBinary(); got != helper {
+		t.Fatalf("umount binary = %q, want the absolute candidate %q", got, helper)
+	}
+	t.Setenv("MACKER_UMOUNT", "/custom/umount")
+	if got := umountBinary(); got != "/custom/umount" {
+		t.Fatalf("umount binary = %q, want the configured override", got)
+	}
+}

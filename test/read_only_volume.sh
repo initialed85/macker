@@ -39,7 +39,23 @@ fail() {
 
 [ "$(uname -s)" = "Darwin" ] || fail "this test enforces mount_nullfs and must run on a Darwin node"
 [ -x "$MACKER" ] || fail "$MACKER is not executable; run make first"
-sudo -n /sbin/mount_nullfs -h >/dev/null 2>&1 || fail "passwordless sudo for /sbin/mount_nullfs is required"
+
+# Resolve a mount helper the way Macker does, so a failure here names the helper
+# and the privilege problem instead of blaming the test.
+HELPER=""
+for candidate in /sbin/mount_nullfs /usr/sbin/mount_nullfs /usr/local/sbin/mount_nullfs; do
+  if [ -x "$candidate" ]; then
+    HELPER="$candidate"
+    break
+  fi
+done
+if [ -n "$HELPER" ]; then
+  sudo -n "$HELPER" -h >/dev/null 2>&1 || fail "passwordless sudo for $HELPER is required"
+else
+  [ -x /sbin/mount ] || fail "no mount helper on this node: tried /sbin/mount_nullfs, /usr/sbin/mount_nullfs, /usr/local/sbin/mount_nullfs and /sbin/mount"
+  sudo -n /sbin/mount -h >/dev/null 2>&1 || fail "passwordless sudo for /sbin/mount is required"
+  echo "note: no mount_nullfs helper found; Macker will attempt \`mount -t null -o ro\`" >&2
+fi
 
 mkdir -p "$HOST_DIR"
 echo "original" > "$HOST_DIR/payload"

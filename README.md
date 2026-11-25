@@ -362,7 +362,15 @@ it:
 
 Read-only volumes need a Darwin node, a directory host path (macOS
 `mount_nullfs` cannot mount a single file read-only), and root or passwordless
-sudo, exactly like PF port publishing and network setup. `:rw` and any other
+sudo, exactly like PF port publishing and network setup. Macker resolves the
+helper by absolute path before it consults `$PATH` — `/sbin/mount_nullfs`, then
+`/usr/sbin/mount_nullfs` and `/usr/local/sbin/mount_nullfs`, then `$PATH`, and
+finally `mount -t null -o ro` through `/sbin/mount` and its siblings — because a
+node agent that launches Macker from a service context can have a `$PATH` that
+excludes `/sbin`, and that must not decide whether a node supports read-only
+mounts. `MACKER_MOUNT_NULLFS` and `MACKER_UMOUNT` name the helpers explicitly if
+a node keeps them elsewhere. A node with no usable helper reports every command
+it tried and how each was rejected. `:rw` and any other
 third field are rejected with an error; writable is the default and needs no
 option. The mount is unmounted on exit, `stop`, `rm` and reconciliation after an
 external kill, and `macker inspect --format json` reports both the requested

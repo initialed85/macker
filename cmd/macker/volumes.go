@@ -142,25 +142,103 @@ func mountReadOnlyVolume(hostPath, target string, mount volume) error {
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		return fmt.Errorf("create read-only volume mount point %q: %w", mount.containerPath(), err)
 	}
-	binary, err := mountNullfsBinary()
+	attempts, err := nullfsMountAttempts(hostPath, target)
 	if err != nil {
 		return err
 	}
-	// mount(8) wrappers differ in where they stop scanning options, so try the
-	// documented placement first and then the trailing-option form.
-	attempts := [][]string{
-		{"-o", "ro", hostPath, target},
-		{hostPath, target, "-o", "ro"},
-	}
-	var lastErr error
-	for _, args := range attempts {
-		if _, err := runPrivileged(binary, args...); err != nil {
-			lastErr = err
+	// mount(8) wrappers differ in where they stop scanning options, so each
+	// helper is tried in the documented option placement and then the trailing
+	// placement. Every failure is reported, because the reason a node could not
+	// mount - missing helper, no passwordless sudo, a kernel without nullfs - is
+	// the thing the caller has to act on next.
+	failures := make([]string, 0, len(attempts))
+	for _, attempt := range attempts {
+		if _, err := runPrivileged(attempt.Binary, attempt.Args...); err != nil {
+			failures = append(failures, fmt.Sprintf("%s %s: %v", attempt.Binary, strings.Join(attempt.Args, " "), err))
 			continue
 		}
 		return nil
 	}
-	return fmt.Errorf("mount %q read-only at %q: %w; read-only volumes require root or passwordless sudo", hostPath, target, lastErr)
+	return fmt.Errorf("mount %q read-only at %q: %s; read-only volumes require root or passwordless sudo", hostPath, target, strings.Join(failures, "; "))
+}
+
+// mountAttempt is one concrete command Macker tries when mounting a read-only
+// volume.
+type mountAttempt struct {
+	Binary string
+	Args   []string
+}
+
+// Absolute helper locations tried before $PATH. A node agent such as maclet
+// launches Macker from a service context whose PATH does not include /sbin, and
+// resolving a mount helper by name there fails on a node that has the helper.
+var mountNullfsCandidatePaths = []string{
+	"/sbin/mount_nullfs",
+	"/usr/sbin/mount_nullfs",
+	"/usr/local/sbin/mount_nullfs",
+}
+
+var mountHelperCandidatePaths = []string{
+	"/sbin/mount",
+	"/usr/sbin/mount",
+	"/bin/mount",
+	"/usr/bin/mount",
+}
+
+// nullfsMountAttempts returns the mount commands Macker tries, most specific
+// first: the nullfs helper in its documented option placement, the same helper
+// with options trailing, then mount(8) asked for the null filesystem type. The
+// explicit nullfs helper is preferred because it cannot be mistaken for a
+// request to mount some other filesystem type read-only.
+func nullfsMountAttempts(hostPath, target string) ([]mountAttempt, error) {
+	if configured := os.Getenv("MACKER_MOUNT_NULLFS"); configured != "" {
+		return []mountAttempt{
+			{Binary: configured, Args: []string{"-o", "ro", hostPath, target}},
+			{Binary: configured, Args: []string{hostPath, target, "-o", "ro"}},
+		}, nil
+	}
+	var attempts []mountAttempt
+	for _, binary := range resolveHelper(mountNullfsCandidatePaths, "mount_nullfs") {
+		attempts = append(attempts,
+			mountAttempt{Binary: binary, Args: []string{"-o", "ro", hostPath, target}},
+			mountAttempt{Binary: binary, Args: []string{hostPath, target, "-o", "ro"}},
+		)
+	}
+	for _, binary := range resolveHelper(mountHelperCandidatePaths, "mount") {
+		attempts = append(attempts,
+			mountAttempt{Binary: binary, Args: []string{"-t", "null", "-o", "ro", hostPath, target}},
+			mountAttempt{Binary: binary, Args: []string{"-t", "null", hostPath, target, "-o", "ro"}},
+		)
+	}
+	if len(attempts) == 0 {
+		return nil, fmt.Errorf("no mount helper was found: tried %s and LookPath(mount_nullfs), then %s and LookPath(mount); confirm on the node with `ls -l /sbin/mount_nullfs` and `sudo /sbin/mount -t null -o ro SOURCE TARGET`, or name the helper explicitly with MACKER_MOUNT_NULLFS", strings.Join(mountNullfsCandidatePaths, ", "), strings.Join(mountHelperCandidatePaths, ", "))
+	}
+	return attempts, nil
+}
+
+// resolveHelper returns executable candidates by absolute path first, then the
+// bare name through $PATH, which is last rather than first so a restricted
+// service PATH cannot decide whether a node supports a mount.
+func resolveHelper(candidates []string, name string) []string {
+	found := make([]string, 0, len(candidates)+1)
+	seen := make(map[string]struct{}, len(candidates)+1)
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		if _, duplicate := seen[candidate]; duplicate {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		found = append(found, candidate)
+	}
+	if resolved, err := exec.LookPath(name); err == nil {
+		if _, duplicate := seen[resolved]; !duplicate {
+			found = append(found, resolved)
+		}
+	}
+	return found
 }
 
 // nullfsAvailable reports whether this node has the Darwin nullfs mount path.
@@ -170,21 +248,22 @@ func nullfsAvailable() bool {
 	return runtime.GOOS == "darwin" || os.Getenv("MACKER_TEST_ALLOW_NULLFS") != ""
 }
 
-func mountNullfsBinary() (string, error) {
-	if configured := os.Getenv("MACKER_MOUNT_NULLFS"); configured != "" {
-		return configured, nil
+func umountBinary() string {
+	if configured := os.Getenv("MACKER_UMOUNT"); configured != "" {
+		return configured
 	}
-	if !nullfsAvailable() {
-		return "", fmt.Errorf("mount_nullfs is a Darwin utility; current host is %s/%s", runtime.GOOS, runtime.GOARCH)
+	resolved := resolveHelper(umountCandidatePaths, "umount")
+	if len(resolved) > 0 {
+		return resolved[0]
 	}
-	candidate := "/sbin/mount_nullfs"
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate, nil
-	}
-	if found, err := exec.LookPath("mount_nullfs"); err == nil {
-		return found, nil
-	}
-	return "", errors.New("mount_nullfs was not found; it ships with macOS")
+	return "/sbin/umount"
+}
+
+var umountCandidatePaths = []string{
+	"/sbin/umount",
+	"/usr/sbin/umount",
+	"/bin/umount",
+	"/usr/bin/umount",
 }
 
 // unmountReadOnlyVolumes detaches read-only volume mounts before a container's
@@ -206,11 +285,4 @@ func unmountReadOnlyVolumes(rootfs string, volumes []volume) error {
 		}
 	}
 	return errors.Join(cleanupErrors...)
-}
-
-func umountBinary() string {
-	if configured := os.Getenv("MACKER_UMOUNT"); configured != "" {
-		return configured
-	}
-	return "/sbin/umount"
 }

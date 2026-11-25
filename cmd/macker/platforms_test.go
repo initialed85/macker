@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -278,27 +281,12 @@ func TestPlatformListingRejectsDeeperNesting(t *testing.T) {
 func TestCommandPlatformsRemoteAndPullPreflight(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MACKER_HOME", home)
-	fake := filepath.Join(home, "skopeo")
 	indexJSON := strings.Join([]string{
 		`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[`,
 		`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:aaaa","size":10,"platform":{"os":"linux","architecture":"arm64"}},`,
 		`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:bbbb","size":10,"platform":{"os":"linux","architecture":"amd64"}}]}`,
 	}, "")
-	fakeScript := strings.Join([]string{
-		"#!/bin/sh",
-		"case \"$1\" in",
-		"  inspect) cat <<'JSON'",
-		indexJSON,
-		"JSON",
-		"    ;;",
-		"  copy) printf 'copy must not run\\n' >&2; exit 9 ;;",
-		"  *) printf 'unexpected arguments\\n' >&2; exit 8 ;;",
-		"esac",
-		"",
-	}, "\n")
-	if err := os.WriteFile(fake, []byte(fakeScript), 0o755); err != nil {
-		t.Fatalf("write fake skopeo: %v", err)
-	}
+	fake, calls := fakeSkopeoForPlatforms(t, indexJSON, `{}`)
 	t.Setenv("MACKER_SKOPEO", fake)
 
 	output := captureStdout(t, func() {
@@ -317,6 +305,9 @@ func TestCommandPlatformsRemoteAndPullPreflight(t *testing.T) {
 	}
 	if !strings.Contains(output, "reason: ") {
 		t.Fatalf("output missing a reason line:\n%s", output)
+	}
+	if got := readCommandCalls(t, calls); !reflect.DeepEqual(got, []string{"inspect --raw docker://docker.io/library/busybox:1.36"}) {
+		t.Fatalf("skopeo calls = %q, want one raw-manifest inspect", got)
 	}
 
 	err := commandPull([]string{"busybox:1.36"})
@@ -349,5 +340,188 @@ func TestCommandPlatformsLocalScratchIsNotRegistry(t *testing.T) {
 	err := commandPlatforms([]string{"scratch:latest"})
 	if err == nil || !strings.Contains(err.Error(), "implicit empty Darwin rootfs") {
 		t.Fatalf("error = %v, want an implicit scratch explanation", err)
+	}
+}
+
+// fakeSkopeoForPlatforms writes a skopeo stand-in that reproduces how skopeo
+// 1.25.2 handles its inspect arguments, which is what hid the `--format raw`
+// defect in the first round of tests: only `--raw` writes the stored manifest
+// verbatim, and every other inspect form takes the parsed path, which selects
+// an instance matching the host platform and fails a Linux-only image on a Mac
+// node with upstream's "no image found in image index" error.
+func fakeSkopeoForPlatforms(t *testing.T, indexJSON, configJSON string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "skopeo")
+	calls := filepath.Join(dir, "calls")
+	upstreamFailure := `level=fatal msg="Error parsing manifest for image: choosing image instance: no image found in image index for architecture \"arm64\", variant \"v8\", OS \"darwin\""`
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		`printf '%s\n' "$*" >> ` + strconv.Quote(calls),
+		`if [ "$1" = inspect ] && [ "$2" = --raw ] && [ $# -eq 3 ]; then`,
+		"  cat <<'INDEX'",
+		indexJSON,
+		"INDEX",
+		"  exit 0",
+		"fi",
+		`if [ "$1" = inspect ] && [ "$2" = --config ] && [ "$3" = --raw ] && [ $# -eq 4 ]; then`,
+		"  cat <<'CONFIG'",
+		configJSON,
+		"CONFIG",
+		"  exit 0",
+		"fi",
+		// Upstream's own failure shape, for arguments skopeo would send down the
+		// instance-selecting path.
+		`printf '%s\n' ` + strconv.Quote(upstreamFailure) + " >&2",
+		"exit 1",
+		"",
+	}, "\n")
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake skopeo: %v", err)
+	}
+	return binary, calls
+}
+
+func readCommandCalls(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read recorded calls: %v", err)
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}
+
+// TestRemotePlatformsDoesNotAskSkopeoToSelectAnInstance is the regression test
+// for the defect home-ops measured on icarus-2.local with skopeo 1.25.2: a
+// Linux-only remote image made `macker platforms` fail with skopeo's own
+// instance-selection error instead of printing the platform list.
+func TestRemotePlatformsDoesNotAskSkopeoToSelectAnInstance(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MACKER_HOME", home)
+	indexJSON := strings.Join([]string{
+		`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[`,
+		`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:1111","size":10,"platform":{"os":"linux","architecture":"386"}},`,
+		`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:2222","size":10,"platform":{"os":"linux","architecture":"amd64"}},`,
+		`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:3333","size":10,"platform":{"os":"linux","architecture":"arm64"},`,
+		`"annotations":{"vnd.docker.reference.type":"attestation_manifest"}},`,
+		`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:4444","size":10,"platform":{"os":"unknown","architecture":"unknown"}}]}`,
+	}, "")
+	fake, calls := fakeSkopeoForPlatforms(t, indexJSON, `{}`)
+	t.Setenv("MACKER_SKOPEO", fake)
+
+	output := captureStdout(t, func() {
+		if err := commandPlatforms([]string{"busybox:1.36"}); err != nil {
+			t.Errorf("commandPlatforms must succeed for a Linux-only remote image: %v", err)
+		}
+	})
+	if !strings.Contains(output, "platforms: linux/386, linux/amd64, linux/arm64") {
+		t.Fatalf("output missing the full platform list:\n%s", output)
+	}
+	if strings.Contains(output, "unknown/unknown") {
+		t.Fatalf("output reported attestation entries as platforms:\n%s", output)
+	}
+	if !strings.Contains(output, "runnable here ("+runtime.GOOS+"/"+runtime.GOARCH+"): no") {
+		t.Fatalf("output missing the runnability line:\n%s", output)
+	}
+	if got := readCommandCalls(t, calls); !reflect.DeepEqual(got, []string{"inspect --raw docker://docker.io/library/busybox:1.36"}) {
+		t.Fatalf("skopeo calls = %q, want exactly one `inspect --raw`", got)
+	}
+}
+
+func TestRemotePlatformsReportsSingleManifestPlatform(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MACKER_HOME", home)
+	manifestJSON := `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",` +
+		`"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaa","size":2},` +
+		`"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"sha256:bbbb","size":2}]}`
+	fake, calls := fakeSkopeoForPlatforms(t, manifestJSON, `{"architecture":"amd64","os":"linux"}`)
+	t.Setenv("MACKER_SKOPEO", fake)
+
+	output := captureStdout(t, func() {
+		if err := commandPlatforms([]string{"busybox:1.36"}); err != nil {
+			t.Errorf("commandPlatforms: %v", err)
+		}
+	})
+	if !strings.Contains(output, "platforms: linux/amd64") {
+		t.Fatalf("output missing the single-manifest platform:\n%s", output)
+	}
+	want := []string{
+		"inspect --raw docker://docker.io/library/busybox:1.36",
+		"inspect --config --raw docker://docker.io/library/busybox:1.36",
+	}
+	if got := readCommandCalls(t, calls); !reflect.DeepEqual(got, want) {
+		t.Fatalf("skopeo calls = %q, want %q", got, want)
+	}
+}
+
+func TestRemotePlatformsFailureNamesTheRawInspect(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MACKER_HOME", home)
+	t.Setenv("MACKER_SKOPEO", "/bin/false")
+	err := commandPlatforms([]string{"busybox:1.36"})
+	if err == nil {
+		t.Fatal("expected a failure when skopeo cannot read the manifest")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "read the manifest of docker.io/library/busybox:1.36") {
+		t.Fatalf("error = %q, want it to name the manifest it could not read", message)
+	}
+	if !strings.Contains(message, "skopeo inspect --raw docker://docker.io/library/busybox:1.36") {
+		t.Fatalf("error = %q, want it to name the exact raw inspect an operator can repeat", message)
+	}
+}
+
+// TestRemotePlatformsLiveRegistry is the integration check that synthetic
+// layouts and a permissive fake skopeo could not provide: it runs against a
+// real registry with a real skopeo. Set MACKER_TEST_NETWORK=1 on a machine with
+// skopeo installed and network access to run it.
+func TestRemotePlatformsLiveRegistry(t *testing.T) {
+	if os.Getenv("MACKER_TEST_NETWORK") == "" {
+		t.Skip("set MACKER_TEST_NETWORK=1 to query a real registry with a real skopeo")
+	}
+	skopeo, err := exec.LookPath("skopeo")
+	if err != nil {
+		t.Skipf("this machine has no skopeo: %v", err)
+	}
+	t.Setenv("MACKER_SKOPEO", skopeo)
+	t.Setenv("MACKER_HOME", t.TempDir())
+
+	for _, reference := range []string{"busybox:1.36", "python:3.12-slim"} {
+		ref, err := parseImageRef(reference)
+		if err != nil {
+			t.Fatalf("parse %s: %v", reference, err)
+		}
+		listing, err := listImagePlatforms(ref)
+		if err != nil {
+			t.Fatalf("list %s platforms: %v", reference, err)
+		}
+		if listing.Source != "registry" {
+			t.Fatalf("%s source = %q, want registry", reference, listing.Source)
+		}
+		if len(listing.Platforms) < 2 {
+			t.Fatalf("%s platforms = %+v, want a multi-platform list", reference, listing.Platforms)
+		}
+		linuxSeen := false
+		for _, candidate := range listing.Platforms {
+			if candidate.OS == "linux" {
+				linuxSeen = true
+			}
+			if candidate.OS == "" || candidate.Architecture == "" {
+				t.Fatalf("%s reported an incomplete platform %+v", reference, candidate)
+			}
+		}
+		if !linuxSeen {
+			t.Fatalf("%s platforms = %+v, want at least one linux manifest", reference, listing.Platforms)
+		}
+		if listing.HasRunnable {
+			t.Fatalf("%s was reported runnable on %s/%s", reference, listing.HostOS, listing.HostArch)
+		}
 	}
 }

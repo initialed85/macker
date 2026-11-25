@@ -113,17 +113,44 @@ func remoteImagePlatforms(ref imageRef) (imagePlatformListing, error) {
 	if err != nil {
 		return imagePlatformListing{}, err
 	}
-	output, err := runCommandOutput(skopeo, "inspect", "--format", "raw", "docker://"+ref.Normalized)
+	// `--raw` is skopeo's boolean flag for "write the manifest exactly as the
+	// registry stores it". `--format` is something else entirely: a Go template
+	// selector. `--format raw` therefore takes skopeo's parsed path, which first
+	// selects the instance matching the host platform, and on a Mac node a
+	// Linux-only image dies there with "no image found in image index for
+	// architecture ..." - the opaque message this command exists to replace.
+	// Macker needs the top-level index, never an instance, so it must ask for
+	// the unmodified manifest. Confirmed against skopeo 1.25.2 (cmd/skopeo/inspect.go:
+	// only opts.raw writes the manifest verbatim; every other path runs
+	// image.FromUnparsedImage, which is where instance selection happens).
+	output, err := runCommandOutput(skopeo, "inspect", "--raw", "docker://"+ref.Normalized)
 	if err != nil {
-		return imagePlatformListing{}, fmt.Errorf("inspect %s: %w", ref.Normalized, err)
+		return imagePlatformListing{}, fmt.Errorf("read the manifest of %s: %w; macker reads registry manifests through skopeo, so check the registry's own answer with `skopeo inspect --raw docker://%s` and `skopeo login` if this registry needs credentials", ref.Normalized, err, ref.Normalized)
 	}
 	var index imageIndex
 	if err := json.Unmarshal(output, &index); err != nil {
-		return imagePlatformListing{}, fmt.Errorf("parse skopeo inspect output for %s: %w", ref.Normalized, err)
+		return imagePlatformListing{}, fmt.Errorf("parse the manifest of %s: %w", ref.Normalized, err)
 	}
 	platforms, err := collectImagePlatforms("", index, 1)
 	if err != nil {
 		return imagePlatformListing{}, fmt.Errorf("read %s platforms: %w", ref.Normalized, err)
+	}
+	if len(platforms) == 0 && !isIndexMediaType(index.MediaType) && len(index.Manifests) == 0 {
+		// A tag pointing straight at a single manifest carries no platform field
+		// in that document, so read its config blob. This second call is safe
+		// precisely because there is no index to choose an instance from.
+		var single manifest
+		if err := json.Unmarshal(output, &single); err == nil && single.Config.Digest != "" {
+			configOutput, err := runCommandOutput(skopeo, "inspect", "--config", "--raw", "docker://"+ref.Normalized)
+			if err != nil {
+				return imagePlatformListing{}, fmt.Errorf("read the configuration of %s: %w", ref.Normalized, err)
+			}
+			var config imageConfig
+			if err := json.Unmarshal(configOutput, &config); err != nil {
+				return imagePlatformListing{}, fmt.Errorf("parse the configuration of %s: %w", ref.Normalized, err)
+			}
+			platforms = dedupePlatforms([]platform{{OS: config.OS, Architecture: config.Architecture}})
+		}
 	}
 	return newPlatformListing(ref, "registry", platforms), nil
 }
@@ -264,6 +291,9 @@ func platformListText(platforms []platform) string {
 // runtime-level "no image found in image index" failure.
 func platformUnsuitableReason(listing imagePlatformListing) string {
 	host := listing.HostOS + "/" + listing.HostArch
+	if len(listing.Platforms) == 0 {
+		return fmt.Sprintf("%s carries no manifest with platform metadata, so Macker cannot tell what it is built for; read it directly with `skopeo inspect --raw docker://%s`", listing.Reference, listing.Reference)
+	}
 	if listing.HostOS != "darwin" {
 		return fmt.Sprintf("this host is %s; Macker runs workloads on macOS, and %s offers %s", host, listing.Reference, platformListText(listing.Platforms))
 	}

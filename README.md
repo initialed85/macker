@@ -466,6 +466,15 @@ Run the Go checks with:
 make test
 ```
 
+The checks that read a registry use a skopeo that reproduces how the real one
+handles its arguments. To repeat them against real registries with the real
+skopeo installed, set `MACKER_TEST_NETWORK=1`; the tests that need it skip
+themselves otherwise:
+
+```sh
+MACKER_TEST_NETWORK=1 go test ./cmd/... -run LiveRegistry
+```
+
 The full `test.sh` workflow builds Linux amd64 and arm64 images with Docker,
 combines them with Darwin images, verifies the resulting multi-platform images,
 checks `--entrypoint`, interactive `exec`, `logs`, `--rm`, and injected network

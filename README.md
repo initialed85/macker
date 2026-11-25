@@ -496,11 +496,18 @@ same call form, `apfs`, `hfs`, `autofs` and `lifs` draw `EINVAL` for a bad spec,
 draws a version error, a made-up name and the type `null` both draw errno 19, and
 `nullfs` draws `EPERM` - three runs, same answer. So the filesystem is present and
 policy-gated rather than absent, and the gate is one a third-party helper cannot
-satisfy. Two traps cost this conclusion being wrong here once and are worth knowing
+satisfy. `nullfs` draws `EPERM` even with no mount data passed at all, so the refusal is
+at the vfs entry point and not an artefact of a malformed spec. Four traps cost this
+conclusion being wrong here once and are worth knowing
 before re-measuring: errno 19 on Darwin is `ENOTSUP`, "operation not supported by
-device", not `ENODEV`, "no such device"; and `sysctl vfs.generic` is not the registry -
+device", not `ENODEV`, "no such device"; `sysctl vfs.generic` is not the registry -
 it lists `apfs autofs hfs lifs nfs` on this node and omits `devfs`, which mounts fine,
-so a missing oid proves nothing. `macker volumes --probe` is what turns the question
+so a missing oid proves nothing; the mount table only ever reports the resolved path, so
+comparing a `statfs` `Mntonname` against the `/tmp/...` you passed answers "not mounted"
+for a mount that is live and it never gets released (six read-only `devfs` mounts got
+stranded on a node that way); and `mount(8)` accepts both `nullfs` and `null` as type
+names, each failing with exit 72 while looking for a bundle - `nullfs.fs` and `null.fs`
+respectively - so a `mount -t` failure says nothing about the kernel. `macker volumes --probe` is what turns the question
 into a per-node answer instead of an OS guess, and it needs a call form that reaches
 the vfs layer at all: pass the four arguments to syscall 167 directly rather than a
 struct pointer, which draws `EFAULT` for every type on macOS 26 arm64. Macker is

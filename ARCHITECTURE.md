@@ -245,23 +245,37 @@ working around them:
   nullfs is still there (`bsd/miscfs/nullfs/`) and its mount entry point opens with
   `if (!IOCurrentTaskHasEntitlement("com.apple.private.nullfs_allow")) return EPERM;`
   with no fallback for root, while its unmount entry point accepts the entitlement
-  *or* superuser. So the userland route - the bundle, `mount_null`, `mount_nullfs` -
-  was removed and the kernel route was gated. Reopening it needs a helper that calls
+  *or* superuser. `nullfs` draws `EPERM` even when the mount data pointer is nil, which
+  closes the escape hatch of "the spec was malformed - fix the call and it mounts": the
+  refusal happens at the vfs entry point, before anything parses a spec. So the userland
+  route - the bundle, `mount_null`, `mount_nullfs` - was removed and the kernel route was
+  gated. Reopening it needs a helper that calls
   `mount(2)` with the type `nullfs` **and** holds that entitlement, which a third-party
   binary cannot obtain. Nothing on the node serves as one: `/Library/Filesystems`
   contains only `NetFSPlugins`, the sealed `/System/Library/Filesystems` ships 17
   bundles with no `null.fs` or `nullfs.fs` among them, and no `mount_null*` exists in
-  `/sbin`, `/usr/sbin` or `/usr/bin`.
-- Two measurement traps that produced the wrong conclusion here once, recorded
-  because both are easy to fall into again. First, **errno 19 on Darwin is `ENOTSUP`,
-  "operation not supported by device", not `ENODEV`, "no such device"** (Linux numbers
-  them the other way round); a probe that prints 19 found an unregistered *name*, and
-  that is exactly how "the kernel registers no nullfs at all" got reported here. It is
-  false: `nullfs` is registered and answers `EPERM`. Second, **`sysctl vfs.generic` is
+  `/sbin`, `/usr/sbin` or `/usr/bin`. `mount(8)` does accept both type names on this OS
+  and fails before the kernel is consulted either way: `mount -t nullfs` looks for
+  `/Library/Filesystems/nullfs.fs/Contents/Resources/mount_nullfs` and `mount -t null`
+  looks for `null.fs/Contents/Resources/mount_null`, each exiting 72. That is why Macker
+  checks both bundle names and asks for both type names, `nullfs` first.
+- Four measurement traps that produced a wrong conclusion here once, recorded
+  because all of them are easy to fall into again. First, **errno 19 on Darwin is
+  `ENOTSUP`, "operation not supported by device", not `ENODEV`, "no such device"**
+  (Linux numbers them the other way round); a probe that prints 19 found an
+  unregistered *name*, and that is exactly how "the kernel registers no nullfs at all"
+  got reported here. It is false: `nullfs` is registered and answers `EPERM`. Second,
+  **`sysctl vfs.generic` is
   not the filesystem registry**: on this node it lists `apfs autofs hfs lifs nfs` and
   omits `devfs`, which mounts and unmounts fine, so `sysctl vfs.generic.nullfs`
   reporting an unknown oid proves nothing. The mount(2) errno classes above are the
-  discriminator. Third, the ABI you use decides whether you reach the vfs layer at
+  discriminator. Third, **`/tmp` is `/private/tmp`, and the mount table only ever reports
+  the resolved path**: a check that compares a `statfs` `Mntonname` against the path the
+  probe passed in answers "not mounted" for a mount that is live, and that mount then
+  never gets released - six read-only `devfs` mounts sat on this node that way until it
+  was noticed. Release the path you created and read the command's exit status, which is
+  what `macker volumes --probe` does; it never inspects the mount table by path string.
+  Fourth, the ABI you use decides whether you reach the vfs layer at
   all: the four-argument form `syscall(SYS_MOUNT, type, mount_point, flags, data)`
   works on macOS 26 arm64 (the `devfs` control above mounts through it), while the
   struct-pointer form `syscall(SYS_MOUNT, &struct mount_args, 0, 0)` used by the helper

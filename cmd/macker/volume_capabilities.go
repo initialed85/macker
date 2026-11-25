@@ -52,6 +52,23 @@ func nullfsBundleSearchText() string {
 	return strings.Join(names, " or ")
 }
 
+// nullfsBundleTypeName maps a bundle back to the type name mount(8) must be asked for
+// to reach it, because on macOS the two are paired: nullfs.fs serves the type name
+// nullfs through Contents/Resources/mount_nullfs, and null.fs serves null through
+// mount_null. Suggesting the other one sends an operator to an exit 72 that says
+// nothing about the kernel. Measured on icarus-2 (macOS 26.6.2), where neither bundle
+// exists and each name fails while looking for its own helper:
+//
+//	mount: exec /Library/Filesystems/nullfs.fs/Contents/Resources/mount_nullfs for /private/tmp/...: No such file or directory
+//	mount: /private/tmp/... failed with 72
+//	mount: exec /Library/Filesystems/null.fs/Contents/Resources/mount_null for /private/tmp/...: No such file or directory
+func nullfsBundleTypeName(bundle string) string {
+	if filepath.Base(bundle) == "null.fs" {
+		return "null"
+	}
+	return "nullfs"
+}
+
 // readOnlyMountBlockage returns the reason Macker cannot enforce a read-only
 // volume on a given host OS, or an empty string when it may attempt the mount.
 // It does not consult runtime.GOOS, so a test can ask the Darwin question on any
@@ -91,9 +108,10 @@ func readOnlyMountGuidance(hostOS string) string {
 		return fmt.Sprintf("a Darwin node is required for a read-only volume; on this host Macker refuses :ro rather than approximating it with a permission change or a symlink. Check the mount helpers with ls -l /sbin/mount_nullfs, or name one with MACKER_MOUNT_NULLFS and its partner MACKER_UMOUNT")
 	}
 	if found := nullfsBundleFound(); found != "" {
-		return fmt.Sprintf("the null filesystem bundle %s exists on this node; confirm the mount helpers with ls -l /sbin/mount_nullfs and `sudo /sbin/mount -t nullfs -o ro SOURCE TARGET`, or name them with MACKER_MOUNT_NULLFS and MACKER_UMOUNT. `macker volumes --probe` answers with a mount this kernel accepted and a write it refused", found)
+		typeName := nullfsBundleTypeName(found)
+		return fmt.Sprintf("the null filesystem bundle %s exists on this node, so mount(8) can reach the type name %s; confirm the helpers with ls -l /sbin/mount_nullfs /sbin/mount_null and `sudo /sbin/mount -t %s -o ro SOURCE TARGET`, or name a helper with MACKER_MOUNT_NULLFS and MACKER_UMOUNT. `macker volumes --probe` answers with a mount this kernel accepted and a write it refused", found, typeName, typeName)
 	}
-	return "The filesystem is registered under the type name nullfs, not null. A calibrated mount(2) probe run as root on macOS 26.6.2 (Darwin 25.6.0, arm64) mounts devfs through the same four-argument call form and releases it again, draws EINVAL for a bad spec against apfs, hfs, autofs and lifs, a version error for nfs, the same errno for a made-up name and for the type null, and EPERM for nullfs - three runs, same answer. EPERM from the vfs mount entry point is what Apple's source for this Darwin generation predicts: null_mount returns EPERM unless the calling task holds com.apple.private.nullfs_allow, with no fallback for root, so a helper needs that entitlement as well as root and a third-party binary cannot obtain it. Two traps for anyone re-running this: errno 19 on Darwin is ENOTSUP, \"operation not supported by device\", not ENODEV \"no such device\", so a probe that prints 19 found an unregistered name rather than an absent filesystem; and `sysctl vfs.generic` is not the registry - on this node it lists apfs autofs hfs lifs nfs and omits devfs, which mounts and unmounts fine, so a missing oid proves nothing. Check with ls -l /sbin/mount_nullfs, ls -d /Library/Filesystems/nullfs.fs /Library/Filesystems/null.fs and `sudo /sbin/mount -t nullfs -o ro SOURCE TARGET`; MACKER_MOUNT_NULLFS names a helper that calls mount(2) with the type nullfs directly and is exempt from the bundle check, which is the route to test if you ever hold an entitled helper; `macker volumes --probe` reports a verdict from a mount the kernel accepted and a write it refused"
+	return "The filesystem is registered under the type name nullfs, not null. A calibrated mount(2) probe run as root on macOS 26.6.2 (Darwin 25.6.0, arm64) mounts devfs through the same four-argument call form and releases it again, draws EINVAL for a bad spec against apfs, hfs, autofs and lifs, a version error for nfs, the same errno for a made-up name and for the type null, and EPERM for nullfs - three runs, same answer. EPERM from the vfs mount entry point is what Apple's source for this Darwin generation predicts: null_mount returns EPERM unless the calling task holds com.apple.private.nullfs_allow, with no fallback for root, so a helper needs that entitlement as well as root and a third-party binary cannot obtain it; and nullfs draws EPERM even with no mount data passed at all, so the refusal is at the entry point and not an artefact of a malformed spec. Four traps for anyone re-running this: errno 19 on Darwin is ENOTSUP, \"operation not supported by device\", not ENODEV \"no such device\", so a probe that prints 19 found an unregistered name rather than an absent filesystem; `sysctl vfs.generic` is not the registry - on this node it lists apfs autofs hfs lifs nfs and omits devfs, which mounts and unmounts fine, so a missing oid proves nothing; the mount table only reports the resolved path, so comparing a statfs Mntonname against the /tmp path you passed answers \"not mounted\" for a mount that is live and it never gets released, which stranded six read-only devfs mounts on this node once; and mount(8) accepts both nullfs and null as type names and each fails with exit 72 while looking for a bundle (nullfs.fs, null.fs), so a mount -t failure says nothing about the kernel. Check with ls -l /sbin/mount_nullfs, ls -d /Library/Filesystems/nullfs.fs /Library/Filesystems/null.fs and `sudo /sbin/mount -t nullfs -o ro SOURCE TARGET`; MACKER_MOUNT_NULLFS names a helper that calls mount(2) with the type nullfs directly and is exempt from the bundle check, which is the route to test if you ever hold an entitled helper; `macker volumes --probe` reports a verdict from a mount the kernel accepted and a write it refused"
 }
 
 // volumeCapabilityReport answers, for a caller such as a node agent, whether a

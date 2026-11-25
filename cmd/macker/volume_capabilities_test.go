@@ -642,3 +642,39 @@ func TestWriteAcceptedProbeStillReportsALiveMount(t *testing.T) {
 		t.Fatalf("rendered report = %q, want the operator checklist alongside the verdict", text)
 	}
 }
+
+// TestNullfsBundleTypeNameNamesTheTypeMountEightNeeds pins the pairing measured on
+// macOS 26.6.2: the bundle nullfs.fs serves the type name nullfs through
+// Contents/Resources/mount_nullfs, and null.fs serves null through mount_null. Asking
+// for the other one exits 72 while looking for a helper, which reads like a kernel
+// refusal and is not one.
+func TestNullfsBundleTypeNameNamesTheTypeMountEightNeeds(t *testing.T) {
+	for bundle, want := range map[string]string{
+		"/Library/Filesystems/nullfs.fs": "nullfs",
+		"/Library/Filesystems/null.fs":   "null",
+	} {
+		if got := nullfsBundleTypeName(bundle); got != want {
+			t.Errorf("nullfsBundleTypeName(%q) = %q, want %q", bundle, got, want)
+		}
+	}
+
+	original := nullfsBundlePaths
+	t.Cleanup(func() { nullfsBundlePaths = original })
+	bundle := filepath.Join(t.TempDir(), "null.fs")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatalf("create the null.fs bundle stand-in: %v", err)
+	}
+	nullfsBundlePaths = []string{bundle}
+	t.Setenv("MACKER_MOUNT_NULLFS", "")
+
+	guidance := readOnlyMountGuidance("darwin")
+	if !strings.Contains(guidance, "mount -t null -o ro SOURCE TARGET") {
+		t.Fatalf("guidance = %q, want a node whose bundle is null.fs to be told to ask mount(8) for the type name null", guidance)
+	}
+	if strings.Contains(guidance, "mount -t nullfs") {
+		t.Fatalf("guidance = %q, want no nullfs mount form on a node whose only bundle is null.fs", guidance)
+	}
+	if !strings.Contains(guidance, "/sbin/mount_null") {
+		t.Fatalf("guidance = %q, want the helper name that bundle ships", guidance)
+	}
+}

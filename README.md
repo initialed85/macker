@@ -235,6 +235,28 @@ and does not add special VXLAN or bridge-member handling. PF redirects ingress
 traffic; a connection from the Mac to its own published address may require
 testing from another host.
 
+Verify a published port with `macker ports` instead of guessing at PF state:
+
+```sh
+sudo ./bin/macker ports                        # every container with an anchor
+sudo ./bin/macker ports --format json nginx    # one container
+```
+
+It reads back the anchor Macker installed for each container (the same name
+`inspect` reports as `pf_anchor`) and prints the rule with the kernel's own
+counters, so a redirect that is installed but never matched shows up as
+`EVALUATIONS 0` while traffic is being offered. A plain `sudo pfctl -s Anchors`
+does not list the `com.apple/*` child anchors Macker loads on macOS 26; only
+`sudo pfctl -s Anchors -vv` does, and `sudo pfctl -a <pf_anchor> -sn -v` is the
+shortest way to see one container's rules and counters.
+
+Measure reachability from another host. A workload IP is a local alias on the
+node, and a connection the node makes to its own address never reaches the PF
+redirect - the anchor's rule counters stay at zero for such an attempt, so a
+node-local test reports "connection refused" against a redirect that works for
+everyone else. Check the workload itself from the node with
+`127.0.0.1:<NODE_PORT>`.
+
 ```sh
 mkdir -p /tmp/macker-www
 printf 'hello from a Macker volume\n' > /tmp/macker-www/index.html
@@ -327,7 +349,8 @@ for signal termination), `started_at`, `finished_at`, `termination_signal`,
 `termination_reason` (`exited`, `exited-with-error`, `signal`, or `stopped`),
 and `paused_at` when the workload is suspended. The object also includes
 `ports`, an array of `{host_port, node_port, protocol}` objects containing
-resolved mappings (including automatically allocated ports).
+resolved mappings (including automatically allocated ports), and `pf_anchor`,
+the PF anchor that holds the container's redirects.
 Detached `run` records this information when its OCI child exits; `inspect` and
 `ps` reconcile it into `metadata.json`.
 

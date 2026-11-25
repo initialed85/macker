@@ -168,6 +168,7 @@ type containerInspection struct {
 	PausedAt          *time.Time         `json:"paused_at"`
 	WorkloadStartedAt *time.Time         `json:"workload_started_at"`
 	Ports             []portMapping      `json:"ports"`
+	PFAnchor          string             `json:"pf_anchor,omitempty"`
 	Volumes           []volumeInspection `json:"volumes"`
 	MountedVolumes    []volumeInspection `json:"mounted_volumes"`
 }
@@ -221,6 +222,8 @@ func main() {
 		err = commandUnpause(os.Args[2:])
 	case "ps":
 		err = commandPS(os.Args[2:])
+	case "ports":
+		err = commandPorts(os.Args[2:])
 	case "rm":
 		err = commandRM(os.Args[2:])
 	case "images":
@@ -261,6 +264,7 @@ Usage:
   macker unpause NAME
   macker rm [-f|--force] NAME
   macker ps [-a|--all]
+  macker ports [--format json|table] [NAME...]
   macker images
   macker rmi IMAGE
 
@@ -1674,6 +1678,7 @@ func commandInspect(args []string) error {
 		PausedAt:          metadata.PausedAt,
 		WorkloadStartedAt: metadata.WorkloadStartedAt,
 		Ports:             append([]portMapping{}, metadata.Ports...),
+		PFAnchor:          metadata.PFAnchor,
 		Volumes:           volumeInspections(metadata.Volumes),
 		MountedVolumes:    volumeInspections(metadata.MountedVolumes),
 	}
@@ -1705,6 +1710,7 @@ func commandInspect(args []string) error {
 		fmt.Printf("Termination signal: %s\n", valueOrDash(inspection.TerminationSignal))
 		fmt.Printf("Termination reason: %s\n", valueOrDash(inspection.TerminationReason))
 		fmt.Printf("Paused: %s\n", inspectionTime(inspection.PausedAt))
+		fmt.Printf("PF anchor: %s\n", valueOrDash(inspection.PFAnchor))
 		if len(inspection.Volumes) == 0 {
 			fmt.Println("Volumes: -")
 		} else {

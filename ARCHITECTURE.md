@@ -336,9 +336,24 @@ possible even when the container name is long. PF is enabled with a retained
 enable token and cleaned on stop, removal, foreground completion, setup
 failure, or `ps` reconciliation. Macker does not replace the main PF ruleset.
 
+Reading that state back has one trap worth knowing on macOS 26: a plain
+`pfctl -s Anchors` lists only the anchors the system ruleset names, not the
+`com.apple/*` children Macker loads, while `pfctl -s Anchors -vv` does list
+them. So "no `com.apple/macker-*` anchor" is what a correct node looks like to
+the wrong query. `macker ports` avoids the trap: it asks for each container's
+own anchor by name, and reports the rule with its kernel counters
+(`Evaluations`, `States`). Flushing an anchor removes its rules but leaves the
+empty anchor object behind until the system ruleset is reloaded, which Macker
+never does, so an anchor with no rules is an already-removed redirect rather
+than a live one.
+
 PF publishing is IPv4-only, ingress-oriented, and global host configuration;
 a same-Mac request to a published address may not traverse the same path as a
-remote ingress request.
+remote ingress request. It does not: a workload IP is aliased locally on the
+node, and a connection the node originates to its own address is not evaluated
+against the anchor at all, counters included. Node-local reachability is a
+question about `127.0.0.1:<NODE_PORT>`; published-port reachability is measured
+from another host.
 
 ## Persistent state and lifecycle
 

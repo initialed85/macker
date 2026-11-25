@@ -199,6 +199,8 @@ func main() {
 		err = commandPull(os.Args[2:])
 	case "bundle":
 		err = commandBundle(os.Args[2:])
+	case "platforms":
+		err = commandPlatforms(os.Args[2:])
 	case "run":
 		err = commandRun(os.Args[2:])
 	case "exec":
@@ -244,6 +246,7 @@ Usage:
   macker push IMAGE
   macker pull IMAGE
   macker bundle [--no-push] SOURCE DARWIN-IMAGE
+  macker platforms [--format json] IMAGE
   macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--workdir PATH] [--env KEY=VALUE] [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
   macker exec [-i|--interactive] [-t|--tty] NAME [-- COMMAND ARG...]
   macker logs [-f|--follow] NAME
@@ -409,6 +412,18 @@ func commandPull(args []string) error {
 	}
 	if err := ensureStorage(home); err != nil {
 		return err
+	}
+	if isScratchImage(ref) {
+		return errors.New("scratch is an implicit empty Darwin rootfs; run `macker pull` against a real image reference")
+	}
+	// Fail before copying a registry image Macker could never execute, with a
+	// reason naming the platforms that actually exist.
+	listing, err := remoteImagePlatforms(ref)
+	if err != nil {
+		return err
+	}
+	if !listing.HasRunnable {
+		return fmt.Errorf("cannot pull %s: %s", ref.Normalized, platformUnsuitableReason(listing))
 	}
 	layout := imageLayoutPath(home, ref)
 	staging := layout + ".pulling"

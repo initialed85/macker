@@ -135,6 +135,26 @@ Use `--no-push` to keep the merged image local. Bundling only combines image
 manifests; it does not reconcile entrypoints, arguments, environment, or
 application behaviour across platforms.
 
+Ask what an image offers with `platforms`. It reads local storage when the
+reference is stored, otherwise it asks the registry through Skopeo:
+
+```sh
+./bin/macker platforms busybox:1.36
+# docker.io/library/busybox:1.36 (registry)
+# platforms: linux/386, linux/amd64, linux/arm64, ...
+# runnable here (darwin/arm64): no
+# reason: docker.io/library/busybox:1.36 offers linux/386, linux/amd64, ...; Macker needs a
+# darwin/arm64 manifest, and Linux manifests cannot execute on macOS. Use
+# `macker run --entrypoint COMMAND -v HOST:CONTAINER scratch` for volume-mounted Darwin jobs,
+# or build a Darwin image for the workload
+
+./bin/macker platforms --format json nginx:latest
+```
+
+`pull` runs the same check before copying anything, so a reference with no
+Darwin manifest for the host architecture fails with the platform list instead
+of storing an image that can never start.
+
 ## Running workloads
 
 `run` requires explicit `--net=host` or `--net=external` networking and a
@@ -458,3 +478,61 @@ Pull requests run the checks and build but do not create releases.
   release requires a Catalina-compatible Go build and architecture-compatible
   native dependencies; `bundle` retains other platform manifests supplied by a
   source image.
+- Non-Darwin manifests in a bundled or multi-platform image are stored for
+  distribution and verification, but can never execute here. `platforms`
+  reports them, and `pull` refuses a reference with no Darwin manifest matching
+  the host architecture.
+
+## Linux images and Darwin nodes
+
+Macker is the execution half of the Mac node story in Macgrubernetes, and its
+answer to Linux images is **won't-fix, with a diagnostic**:
+
+- Macker starts workloads as ordinary Mach-O host processes. It has no Linux
+  kernel, no ELF loader, no glibc, and no namespaces or cgroups to borrow, so a
+  Linux rootfs cannot execute on a Mac node regardless of how its manifest is
+  presented.
+- Emulation or extraction is not planned. Linux translation layers exist for
+  games on Linux and for Windows on macOS, but nothing trustworthy turns an
+  arbitrary Linux container image into a macOS process, and inventing one would
+  contradict Macker's stated trust model. A real Linux-container story on Apple
+  hardware means a Virtualization.framework VM backend, which is a different
+  product with different overhead and limits.
+- Linux and Darwin manifests therefore coexist on purpose: `bundle` merges them
+  under one tag, Kubernetes schedules Linux pods onto Linux nodes, and Mac nodes
+  receive Darwin workloads. `macker platforms IMAGE` answers which platforms a
+  reference offers before an image is pulled or a job is scheduled.
+
+For a job that must run on a Mac node, the supported shapes are:
+
+1. **A Darwin image** built with `macker build` or `macker oci build`. Go is the
+   cheap path because a Linux build host can cross-compile the binary and macOS
+   only has to run it; that is how `example/hello` and the Woodpecker agent
+   image work, and the release CI already produces Darwin/arm64 and Darwin/amd64
+   Macker binaries from Linux runners.
+2. **`scratch` plus a volume-mounted host command** for scripts and one-off jobs,
+   using the host's own interpreter and tools:
+
+   ```sh
+   ./bin/macker run --rm --net=external \
+     --interface bridge101 --ip 10.42.1.5 \
+     --name=session-uploader \
+     --entrypoint /usr/bin/python3 \
+     --env UPLOAD_GROUP=ed-icarus \
+     -v "$HOME/.pi/agent/sessions:$HOME/.pi/agent/sessions" \
+     -v "$PWD/pi_host_upload.py:$PWD/pi_host_upload.py" \
+     scratch -- "$PWD/pi_host_upload.py"
+   ```
+
+   Because the execution model is non-chroot, mounts are host-path symlinks and
+   the host-side path must already exist and be readable. This shape is honest
+   about what it is: a host process, not a container.
+3. **Stay on a Linux node.** If the workload is genuinely "a Linux base image
+   plus an interpreter", scheduling it on a Linux node is cheaper than
+   reconstructing a Darwin rootfs by hand.
+
+A Python uploader is the common case, and there is no Python-for-Darwin base
+image shipped here. The two supported answers are the `scratch` shape above, or
+porting the script to a single stdlib-only Go binary that cross-compiles on
+Linux and runs as a Darwin workload; Homebrew Python on the Mac is a host
+dependency rather than something Macker can package or verify.

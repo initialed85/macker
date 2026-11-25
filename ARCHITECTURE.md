@@ -9,6 +9,8 @@ Macker's product boundary is deliberately small:
 
 - build a trusted Darwin workload into a local OCI layout;
 - push, pull, and combine Darwin manifests with ordinary multi-platform images;
+- report which platforms an image offers (`macker platforms IMAGE`) and refuse to
+  store a reference with no Darwin manifest for the host architecture;
 - materialize an independent per-container rootfs and run the native workload;
 - provide enough host networking, port publishing, lifecycle state, logs, and
   `exec` support for a maclet-managed Kubernetes node.
@@ -390,7 +392,12 @@ For this mode:
 - the resolved port is available as `MACKER_PORT_1` and in `inspect` JSON;
 - `____MACKER_PORT_1____` can be used in recognized config files such as nginx
   configuration;
-- maclet can use `inspect --format json` to reconcile process and exit state.
+- maclet can use `inspect --format json` to reconcile process and exit state;
+- maclet can use `macker platforms IMAGE --format json` before assigning an image,
+  so a Linux-only pod is rejected as unsupported instead of failing inside a
+  pull attempt. Macker never executes a non-Darwin manifest, and there is no plan
+  to change that; a Linux-container runtime on a Mac node would require a
+  VM-backed runtime rather than this process model.
 
 ## Isolation and trust model
 
@@ -414,6 +421,7 @@ primitive rather than the current native process model.
 ```text
 cmd/macker/main.go          CLI, metadata, state, lifecycle, PF orchestration
 cmd/macker/oci.go           OCI layouts, unpack, command execution, exit records
+cmd/macker/platforms.go     platform reporting and pull pre-flight checks
 cmd/macker/network.go       Darwin network setup and cleanup
 cmd/macker/ports.go         automatic NodePort allocation
 example/hello/              minimal native Darwin workload

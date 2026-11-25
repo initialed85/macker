@@ -5,6 +5,7 @@ MACKER := bin/macker
 ROOTFS := example/rootfs
 IMAGE := example/image
 PULL_LAYOUT := $(IMAGE).pulling
+PLATFORMS_IMAGE ?= busybox:1.36
 NGINX_ROOTFS := example/nginx-rootfs
 NGINX_IMAGE := example/nginx-image
 NGINX_PULL_LAYOUT := $(NGINX_IMAGE).pulling
@@ -16,7 +17,7 @@ AGENT_TAGS ?= $(AGENT_TAG) latest
 REGISTRY_IMAGE ?=
 SKOPEO ?= skopeo
 
-.PHONY: all build macker hello image nginx-rootfs nginx nginx-run nginx-push nginx-pull echo-server echo-server-push echo-server-bundle agent agent-push agent-pull agent-version inspect unpack run push pull test clean
+.PHONY: all build macker hello image nginx-rootfs nginx nginx-run nginx-push nginx-pull echo-server echo-server-push echo-server-bundle agent agent-push agent-pull agent-version platforms inspect unpack run push pull test clean
 
 all: image
 
@@ -143,6 +144,11 @@ agent-version:
 
 test:
 	go test ./...
+
+# Report which platforms an image offers and whether this host can run one of
+# them. Reads local storage first, then asks the registry through Skopeo.
+platforms: build
+	$(MACKER) platforms $(PLATFORMS_IMAGE)
 
 clean:
 	rm -rf bin $(ROOTFS) $(IMAGE) $(PULL_LAYOUT) $(NGINX_ROOTFS) $(NGINX_IMAGE) $(NGINX_PULL_LAYOUT)

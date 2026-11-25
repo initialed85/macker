@@ -10,3 +10,4 @@
 /.build/
 /build-tags.txt
 /build-number.txt
+/.pi/

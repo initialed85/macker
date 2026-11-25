@@ -95,7 +95,12 @@ listen ____MACKER_PORT_1____;
 becomes `listen 8080;` when `MACKER_PORT_1=8080` is present. Tokens use the
 form `____MACKER_NAME____`; the available `MACKER_*` values come from the final
 workload environment. An unset Macker token fails startup rather than leaving
-an invalid configuration behind. Macker skips symlinks, binary-looking files,
+an invalid configuration behind, and the failure names the flag that would have
+supplied the value. A port token needs a published port: `MACKER_PORT_1`,
+`MACKER_PORT_2`, and so on come from the first, second, and later `-p`
+mappings in flag order, so an image whose configuration carries port tokens
+must be run with at least that many `-p` mappings, or with
+`--env MACKER_PORT_N=PORT` supplied explicitly. Macker skips symlinks, binary-looking files,
 and unlisted extensions, and only changes the per-container rootfs—not the
 stored image or host-backed volume targets. Direct `oci run` callers can supply
 values with repeated `--env` flags.

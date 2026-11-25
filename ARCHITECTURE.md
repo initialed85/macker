@@ -223,10 +223,26 @@ working around them:
   `mount(8)` cannot reach the null filesystem type - it fails while looking for the
   type's helper, with exit 72, before the kernel is consulted. Macker refuses `:ro`
   there and the container never starts. The refusal is the guarantee: Macker never
-  reports a read-only volume it could not enforce. Whether the kernel still
-  implements nullfs is not answerable from Go, which provides `mount(2)` only on
-  Linux; restoring enforcement on such a node needs a helper that calls `mount(2)`
-  with the `null` filesystem type, named with `MACKER_MOUNT_NULLFS`.
+  reports a read-only volume it could not enforce.
+- Whether that refusal can be undone is answered by Apple's own source, not by a
+  probe. The xnu generation matching Darwin 25 still ships nullfs as a filesystem
+  (`bsd/miscfs/nullfs/`), and its mount entry point opens with
+  `if (!IOCurrentTaskHasEntitlement("com.apple.private.nullfs_allow")) return EPERM;`
+  with no superuser fallback, while its unmount entry point accepts the entitlement
+  *or* superuser. So the filesystem looks like it is still in the kernel and only
+  the userland route - the bundle, `mount_null`, `mount_nullfs` - was removed, and
+  reopening it needs a helper holding a private Apple entitlement, not merely a
+  helper that knows the ABI. For the record the ABI is now known rather than
+  guessed: syscall 167 with `struct mount_args { char *type; char *path; int flags;
+  caddr_t data; }` - fstype first, mount point second, and the source directory in
+  `data` as a `struct null_mount_conf { uint64_t flags }` followed by the
+  NUL-terminated path. Macker is stdlib-only Go, and Go defines no `Mount` wrapper
+  for darwin, but it does define `SYS_MOUNT = 167` and `SYS_UNMOUNT = 159` in its
+  darwin tables, so the raw call is reachable from Go; the entitlement, not the
+  language, is what blocks it. `MACKER_MOUNT_NULLFS` names a helper for a node that
+  does have one. macOS nullfs also forces `MNT_RDONLY` (with `MNT_NOSUID`,
+  `MNT_DONTBROWSE` and `MNT_MULTILABEL`) on every mount, so it could only ever serve
+  `:ro` and never a writable volume.
 - Directory host paths only, because a nullfs mount cannot make a single file
   read-only. A file mount must drop `:ro`.
 - Root or passwordless sudo is required, as with PF and network operations. A node

@@ -51,7 +51,7 @@ func readOnlyMountBlockage(hostOS string) string {
 	if nullfsBundleFound() {
 		return ""
 	}
-	return fmt.Sprintf("this macOS has no null filesystem bundle at %s, so mount(8) has no helper for the null filesystem type and no mount_nullfs exists; Macker is stdlib-only Go and Go provides mount(2) only on Linux, so it cannot mount nullfs by itself. Point MACKER_MOUNT_NULLFS at a helper that calls mount(2) with fstype %q if the kernel still implements nullfs, or run this workload without :ro", nullfsBundlePath, "null")
+	return fmt.Sprintf("this macOS has no null filesystem bundle at %s, so mount(8) has no helper for the null filesystem type and no mount_nullfs exists. Apple's own source for this Darwin generation still carries nullfs, but its mount entry point requires the private entitlement com.apple.private.nullfs_allow and has no superuser fallback, so a helper needs that entitlement as well as root. Point MACKER_MOUNT_NULLFS at a helper that calls mount(2) with the null filesystem type and holds that entitlement (run Macker with root or passwordless sudo), or run this workload without :ro", nullfsBundlePath)
 }
 
 // volumeCapabilityReport answers, for a caller such as a node agent, whether a

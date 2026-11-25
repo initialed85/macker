@@ -404,10 +404,16 @@ bound to fail:
 The first line is a stable marker — `read-only volumes: supported` or
 `read-only volumes: refused` — and `--format json` reports `read_only_supported`,
 `nullfs_bundle_found`, the helpers resolved, the mount forms that would run, and
-the reason. On macOS 26 the only route back to mount-based enforcement is a helper
-that calls `mount(2)` with the `null` filesystem type, named with
-`MACKER_MOUNT_NULLFS`: Macker is stdlib-only Go, and Go provides `mount(2)` only on
-Linux, so it cannot mount nullfs by itself. `:rw` and any other
+the reason. On macOS 26 mount-based enforcement needs a helper that calls `mount(2)`
+with the `null` filesystem type, named with `MACKER_MOUNT_NULLFS`, and that helper
+must also hold a private Apple entitlement: Apple's source for this Darwin generation
+still contains nullfs as a filesystem, but its mount entry point returns `EPERM` unless
+the calling task holds `com.apple.private.nullfs_allow`, with no fallback for root, while
+its unmount entry point accepts root. So the kernel side appears intact and only the
+userland route - the bundle, `mount_null`, `mount_nullfs` - was removed. Macker is
+stdlib-only Go and Go defines no `Mount` wrapper for darwin, though it does define
+`SYS_MOUNT = 167` and `SYS_UNMOUNT = 159` there, so the syscall is not the obstacle.
+Macker will use such a helper when one exists and refuses `:ro` when it does not. `:rw` and any other
 third field are rejected with an error; writable is the default and needs no
 option. The mount is unmounted on exit, `stop`, `rm` and reconciliation after an
 external kill, and `macker inspect --format json` reports both the requested

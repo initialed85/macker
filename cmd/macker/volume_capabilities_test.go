@@ -44,6 +44,10 @@ func TestReadOnlyMountBlockageNamesBundleAndOverride(t *testing.T) {
 		"no null filesystem bundle",
 		nullfsBundlePath,
 		"mount(2)",
+		// The gate Apple added for this Darwin generation, named exactly so a
+		// reader can check it against xnu's bsd/miscfs/nullfs/null_vfsops.c.
+		"com.apple.private.nullfs_allow",
+		"no superuser fallback",
 		"MACKER_MOUNT_NULLFS",
 		"run this workload without :ro",
 	} {

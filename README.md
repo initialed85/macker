@@ -417,9 +417,9 @@ reporting a read-only volume it could not enforce — home-ops measured no
 `/Library/Filesystems/null.fs` is gone and `mount -t null` fails with exit 72
 before the kernel is consulted.
 
-`macker volumes` answers that capability question without mounting anything, so a
-node agent can decide at admission time instead of launching a workload that is
-bound to fail:
+`macker volumes` answers that capability question without mounting anything, and
+`macker volumes --probe` answers it by mounting something, which is the only
+verdict that cannot be a guess about a helper:
 
 ```sh
 ./bin/macker volumes
@@ -429,18 +429,38 @@ bound to fail:
 # nullfs bundle: /Library/Filesystems/null.fs (found: false)
 # mount helpers resolved: none (searched /sbin/mount_nullfs, ...)
 # reason: this macOS has no null filesystem bundle at /Library/Filesystems/null.fs, ...
+
+./bin/macker volumes --probe
+# read-only volumes: supported
+# verdict source: probed on this node (a mount the kernel accepted and a write it refused)
+# probe mount: /sbin/mount_nullfs -o ro <temporary source> <temporary mount point>
+# reason: probe mount ... enforced read-only: writing inside <mount point> failed with the kernel's read-only error, and the mount was released
 ```
 
 The first line is a stable marker — `read-only volumes: supported` or
 `read-only volumes: refused` — and `--format json` reports `read_only_supported`,
-`nullfs_bundle_found`, the helpers resolved, the mount forms that would run, and
-the reason. On macOS 26 mount-based enforcement needs a helper that calls `mount(2)`
+`nullfs_bundle_found`, `probed`, the `probe` record (`mount_form`, `mount_point`,
+`mount_error`, `write_error`, `unmount_error`), the helpers resolved, the mount
+forms that would run, and the reason. Without `--probe` a `supported` verdict means
+"the helper and the filesystem bundle are present", not "the kernel enforced it", so
+a node agent that gates admission on this should use `--probe`. The probe mounts a
+temporary directory read-only over another temporary directory, writes a file inside
+the mount, and releases the mount; it needs root or passwordless sudo, the same
+privilege a real `:ro` volume needs, so an unprivileged probe reports `refused`
+rather than guessing. A mount that succeeds but still accepts writes is reported as
+`refused`, and a mount that cannot be released is reported with the exact command to
+release it. On macOS 26 mount-based enforcement needs a helper that calls `mount(2)`
 with the `null` filesystem type, named with `MACKER_MOUNT_NULLFS`, and that helper
 must also hold a private Apple entitlement: Apple's source for this Darwin generation
 still contains nullfs as a filesystem, but its mount entry point returns `EPERM` unless
 the calling task holds `com.apple.private.nullfs_allow`, with no fallback for root, while
-its unmount entry point accepts root. So the kernel side appears intact and only the
-userland route - the bundle, `mount_null`, `mount_nullfs` - was removed. Macker is
+its unmount entry point accepts root. The stronger measured fact is that the built
+kernel does not offer the filesystem at all: home-ops's calibrated `mount(2)` probe on
+icarus-2 (macOS 26.6.2) mounts `devfs` through the same call form, draws `EINVAL` from
+`apfs` and `hfs` for a bogus spec, and returns `ENODEV` for `null` - byte-for-byte the
+answer a made-up filesystem name draws - so macOS 26 registers no nullfs vfs and the
+entitlement route is moot there. `macker volumes --probe` is what turns that into a
+per-node answer instead of an OS guess. Macker is
 stdlib-only Go and Go defines no `Mount` wrapper for darwin, though it does define
 `SYS_MOUNT = 167` and `SYS_UNMOUNT = 159` there, so the syscall is not the obstacle.
 Macker will use such a helper when one exists and refuses `:ro` when it does not. `:rw` and any other

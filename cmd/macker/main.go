@@ -254,7 +254,7 @@ Usage:
   macker pull IMAGE
   macker bundle [--no-push] SOURCE DARWIN-IMAGE
   macker platforms [--format json] IMAGE
-  macker volumes [--format json|table]
+  macker volumes [--probe] [--format json|table]
   macker run [-d|--detach] [--rm] [-i|--interactive] [-t|--tty] --net=host|external --name=NAME [--workdir PATH] [--env KEY=VALUE] [--interface IFACE --ip POD_IP] [--host-interface IFACE --host-ip HOST_IP] [-v HOST:CONTAINER[:ro]] [-p HOST_PORT:NODE_PORT[/tcp|/udp]] [--entrypoint COMMAND] IMAGE [-- COMMAND ARG...]
   macker exec [-i|--interactive] [-t|--tty] NAME [-- COMMAND ARG...]
   macker logs [-f|--follow] NAME

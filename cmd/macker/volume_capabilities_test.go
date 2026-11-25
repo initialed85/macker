@@ -209,3 +209,180 @@ func TestNullfsBlockageStaysAbsentWhenMountPlumbingIsTestedOnLinux(t *testing.T)
 		t.Fatalf("blockage = %q, want the documented test seam to allow mount plumbing tests", got)
 	}
 }
+
+// useReadOnlyProbeSeam replaces the mount the probe would perform so a test can
+// say what the kernel answered without asking a kernel to mount anything.
+func useReadOnlyProbeSeam(t *testing.T, run readOnlyProbeRun) {
+	t.Helper()
+	original := readOnlyProbeRunner
+	t.Cleanup(func() { readOnlyProbeRunner = original })
+	readOnlyProbeRunner = func() readOnlyProbeRun { return run }
+}
+
+func TestReadOnlyProbeRunVerdictAndReason(t *testing.T) {
+	mountForm := "/sbin/mount_nullfs -o ro /tmp/src /tmp/mnt"
+
+	supported := readOnlyProbeRun{
+		MountForm:  mountForm,
+		MountPoint: "/tmp/mnt",
+		WriteError: "read-only file system",
+	}
+	if !supported.enforced() {
+		t.Fatalf("probe = %+v, want enforced when the mount was accepted, the write was refused and the unmount succeeded", supported)
+	}
+	if !strings.Contains(supported.reason(), "enforced read-only") || !strings.Contains(supported.reason(), mountForm) {
+		t.Fatalf("reason = %q, want it to name the mount form that enforced read-only", supported.reason())
+	}
+
+	mountRefused := readOnlyProbeRun{
+		MountForm:  mountForm,
+		MountPoint: "/tmp/mnt",
+		MountError: "/sbin/mount -t null -o ro /tmp/src /tmp/mnt: exit status 72",
+	}
+	if mountRefused.enforced() {
+		t.Fatalf("probe = %+v, want not enforced when the mount was refused", mountRefused)
+	}
+	if !strings.Contains(mountRefused.reason(), "probe mount was refused") || !strings.Contains(mountRefused.reason(), "exit status 72") {
+		t.Fatalf("reason = %q, want it to carry the mount failure verbatim", mountRefused.reason())
+	}
+
+	writeAccepted := readOnlyProbeRun{MountForm: mountForm, MountPoint: "/tmp/mnt"}
+	if writeAccepted.enforced() {
+		t.Fatalf("probe = %+v, want a mount that accepts a write inside it to count as refusal", writeAccepted)
+	}
+	if !strings.Contains(writeAccepted.reason(), "was accepted") {
+		t.Fatalf("reason = %q, want it to say the write was accepted", writeAccepted.reason())
+	}
+
+	unmountFailed := readOnlyProbeRun{
+		MountForm:    mountForm,
+		MountPoint:   "/tmp/mnt",
+		WriteError:   "read-only file system",
+		UnmountError: "umount: /tmp/mnt: Resource busy",
+	}
+	if unmountFailed.enforced() {
+		t.Fatalf("probe = %+v, want a mount that could not be released to count as refusal", unmountFailed)
+	}
+	for _, want := range []string{"sudo", "/tmp/mnt", "Resource busy"} {
+		if !strings.Contains(unmountFailed.reason(), want) {
+			t.Fatalf("reason = %q, want it to contain %q so a human can release the mount", unmountFailed.reason(), want)
+		}
+	}
+}
+
+func TestProbeWriteRefusedReportsWhatAWritableDirectoryDoes(t *testing.T) {
+	dir := t.TempDir()
+	if got := probeWriteRefused(dir); got != "" {
+		t.Fatalf("probeWriteRefused = %q, want an empty string when the write was accepted", got)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("directory = %v, want the probe file removed after a write that was accepted (err %v)", entries, err)
+	}
+}
+
+func TestVolumeCapabilitiesWithProbeReportsWhatTheKernelAnswered(t *testing.T) {
+	useNullfsBundle(t, true)
+	t.Setenv("MACKER_MOUNT_NULLFS", "")
+
+	useReadOnlyProbeSeam(t, readOnlyProbeRun{
+		MountForm:  "/sbin/mount_nullfs -o ro src mnt",
+		MountPoint: "/tmp/mnt",
+		WriteError: "read-only file system",
+	})
+	report := volumeCapabilitiesWithProbe("darwin", "arm64")
+	if !report.Probed || report.Probe == nil {
+		t.Fatalf("report = %+v, want the probe record present", report)
+	}
+	if !report.ReadOnlySupported {
+		t.Fatalf("report = %+v, want supported when the kernel mounted read-only and refused the write", report)
+	}
+	if !strings.Contains(report.Mechanism, "proven on this node") {
+		t.Fatalf("mechanism = %q, want it to say the verdict was proven by a mount", report.Mechanism)
+	}
+
+	// A helper that exists is not a kernel that mounts: the same node reports
+	// refused once the probe says the mount was accepted but a write got through.
+	useReadOnlyProbeSeam(t, readOnlyProbeRun{MountForm: "helper -o ro src mnt", MountPoint: "/tmp/mnt"})
+	refused := volumeCapabilitiesWithProbe("darwin", "arm64")
+	if refused.ReadOnlySupported {
+		t.Fatalf("report = %+v, want refused when a write inside the mount was accepted", refused)
+	}
+	if refused.Mechanism != "none" {
+		t.Fatalf("mechanism = %q, want none once the probe contradicts the helper", refused.Mechanism)
+	}
+
+	// On a macOS with no null filesystem the probe is not attempted: the OS fact
+	// is enough, and no mount command is run.
+	useNullfsBundle(t, false)
+	useReadOnlyProbeSeam(t, readOnlyProbeRun{MountForm: "should not run"})
+	blocked := volumeCapabilitiesWithProbe("darwin", "arm64")
+	if blocked.Probe != nil {
+		t.Fatalf("report = %+v, want no probe record when the OS blocks the mount", blocked)
+	}
+	if !strings.Contains(blocked.Reason, "probe not attempted") || !strings.Contains(blocked.Reason, "no null filesystem bundle") {
+		t.Fatalf("reason = %q, want it to say the probe was skipped and why", blocked.Reason)
+	}
+}
+
+func TestVolumesCommandProbeFlagReportsTheProbeRecord(t *testing.T) {
+	useNullfsBundle(t, true)
+	t.Setenv("MACKER_MOUNT_NULLFS", "")
+	// The command path asks about the host it is running on, so a Linux CI node
+	// needs the documented seam to be allowed to reach the mount plumbing at all.
+	t.Setenv("MACKER_TEST_ALLOW_NULLFS", "1")
+	useReadOnlyProbeSeam(t, readOnlyProbeRun{
+		MountForm:  "/sbin/mount_nullfs -o ro src mnt",
+		MountPoint: "/tmp/mnt",
+		WriteError: "read-only file system",
+	})
+
+	encoded := captureStdout(t, func() {
+		if err := commandVolumes([]string{"--probe", "--format", "json"}); err != nil {
+			t.Errorf("volumes --probe --format json: %v", err)
+		}
+	})
+	var report volumeCapabilityReport
+	if err := json.Unmarshal([]byte(encoded), &report); err != nil {
+		t.Fatalf("json output is not a volumeCapabilityReport: %v (%q)", err, encoded)
+	}
+	if !report.Probed || report.Probe == nil || report.Probe.WriteError == "" {
+		t.Fatalf("report = %+v, want the probe record in the json output", report)
+	}
+
+	table := captureStdout(t, func() {
+		if err := commandVolumes([]string{"--probe"}); err != nil {
+			t.Errorf("volumes --probe: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"read-only volumes: supported",
+		"verdict source: probed on this node",
+		"probe mount: /sbin/mount_nullfs -o ro src mnt",
+		"probe write inside the mount: refused with read-only file system",
+	} {
+		if !strings.Contains(table, want) {
+			t.Fatalf("table output = %q, want it to contain %q", table, want)
+		}
+	}
+
+	// Without --probe the command still answers the question, and says it did not
+	// mount anything.
+	plain := captureStdout(t, func() {
+		if err := commandVolumes([]string{"--format", "json"}); err != nil {
+			t.Errorf("volumes --format json: %v", err)
+		}
+	})
+	var unprobed volumeCapabilityReport
+	if err := json.Unmarshal([]byte(plain), &unprobed); err != nil {
+		t.Fatalf("json output is not a volumeCapabilityReport: %v (%q)", err, plain)
+	}
+	if unprobed.Probed || unprobed.Probe != nil {
+		t.Fatalf("report = %+v, want probed false and no probe record without --probe", unprobed)
+	}
+}
+
+func TestReadOnlyProbeRunnerIsTheRealMountProbe(t *testing.T) {
+	if readOnlyProbeRunner == nil {
+		t.Fatal("readOnlyProbeRunner must default to the real probe")
+	}
+}

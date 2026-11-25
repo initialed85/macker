@@ -485,10 +485,14 @@ For this mode:
   pull attempt. Macker never executes a non-Darwin manifest, and there is no plan
   to change that; a Linux-container runtime on a Mac node would require a
   VM-backed runtime rather than this process model.
-- maclet can use `macker volumes --format json` before assigning a `readOnly`
-  hostPath pod, so a node that cannot enforce a read-only mount is reported as
-  unsupported at admission time instead of failing inside a mount attempt. The
-  report answers the capability question without mounting anything.
+- maclet can use `macker volumes --probe --format json` before assigning a
+  `readOnly` hostPath pod, so a node that cannot enforce a read-only mount is
+  reported as unsupported at admission time instead of failing inside a mount
+  attempt. `--probe` is the form a gate should call: the verdict comes from a
+  temporary mount the kernel accepted, a write inside it the kernel refused, and
+  the mount released again. Without `--probe` the same command answers the
+  capability question by inspecting helpers and the null filesystem bundle, which
+  can say "supported" on a node whose kernel would still refuse the mount.
 
 ## Isolation and trust model
 

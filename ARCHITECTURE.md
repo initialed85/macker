@@ -257,17 +257,21 @@ working around them:
   route - the bundle, `mount_null`, `mount_nullfs` - was removed and the kernel route was
   gated. Reopening it needs a helper that calls
   `mount(2)` with the type `nullfs` **and** holds that entitlement, which a third-party
-  binary cannot obtain. `bindfs` is the other bind-mount VFS Apple still ships in this
-  generation and it is gated the same way: `bsd/miscfs/bindfs/bind_vfsops.c` defines
-  `BINDFS_ENTITLEMENT "com.apple.private.bindfs-allow"`, `bindfs_mount()` returns `EPERM`
-  unless the caller holds it, and the mount forces `MNT_RDONLY`. That sentence is read from
-  source for xnu-12377.121.6 rather than measured on this node - maclet added `bindfs` to
-  their name probe so the next node access turns it into a measurement - and it is why
-  reaching for a bindfs bind mount after being told no nullfs helper exists walks into the
-  same door. The `EPERM`-even-with-no-mount-data claim above is likewise structural rather
-  than merely observed: in `nullfs_mount` the entitlement check runs before the `copyin` of
-  the mount conf and before the `copyinstr` of the target path, so a better-formed spec buys
-  an operator nothing. Nothing on the node serves as one: `/Library/Filesystems`
+  binary cannot obtain. `bindfs` is where an operator told "no nullfs helper exists" reaches
+  next, and home-ops measured it on icarus-2 with maclet's name probe: the type name `bindfs`
+  draws `ENODEV` (19) in all three mount-data shapes, identically to `null` and to a made-up
+  name, so **this kernel registers no `bindfs` under that name** and there is no entry point
+  there for anyone to be refused by. Apple's source for the same generation does hold the code
+  - `bsd/miscfs/bindfs/bind_vfsops.c` defines `BINDFS_ENTITLEMENT "com.apple.private.bindfs-allow"`,
+  `bindfs_mount()` returns `EPERM` unless the caller holds it, and the mount forces
+  `MNT_RDONLY` - which is the lesson rather than a contradiction: a source tree and a shipping
+  VFS registry are different things, and reading one cannot establish the other. The same run
+  sharpens the `apfs` row, which had been reported as a flat "bad spec" result: `EFAULT` (14)
+  for a plain string spec or a nil one, `EINVAL` (22) once a conf and a target path are passed
+  together, so a bad-spec claim has to name the data shape it drew. The
+  `EPERM`-even-with-no-mount-data claim above is structural rather than merely observed: in
+  `nullfs_mount` the entitlement check runs before the `copyin` of the mount conf and before the
+  `copyinstr` of the target path, so a better-formed spec buys an operator nothing. Nothing on the node serves as one: `/Library/Filesystems`
   contains only `NetFSPlugins`, the sealed `/System/Library/Filesystems` ships 17
   bundles with no `null.fs` or `nullfs.fs` among them, and no `mount_null*` exists in
   `/sbin`, `/usr/sbin` or `/usr/bin`. `mount(8)` does accept both type names on this OS
@@ -275,7 +279,7 @@ working around them:
   `/Library/Filesystems/nullfs.fs/Contents/Resources/mount_nullfs` and `mount -t null`
   looks for `null.fs/Contents/Resources/mount_null`, each exiting 72. That is why Macker
   checks both bundle names and asks for both type names, `nullfs` first.
-- Four measurement traps that produced a wrong conclusion here once, recorded
+- Five measurement traps that produced a wrong conclusion here once, recorded
   because all of them are easy to fall into again. First, **the type name decides what
   errno 19 means**: `null` is Linux's name for this filesystem, `nullfs` is Darwin's.
   19 is `ENODEV` on both - Apple's own description of `ENODEV` reads "operation not
@@ -311,6 +315,12 @@ working around them:
   macOS nullfs also forces `MNT_RDONLY` (with `MNT_NOSUID`, `MNT_DONTBROWSE` and
   `MNT_MULTILABEL`) on every mount, so it could only ever serve `:ro` and never a
   writable volume.
+  Fifth, **a source tree is not a shipping VFS registry**: Apple's source for this generation
+  contains bindfs and gates `bindfs_mount()` behind `com.apple.private.bindfs-allow`, and reading
+  that file predicts an entitled refusal. `mount(2)` on this node answers `ENODEV` (19) for the
+  name `bindfs` in every data shape, identically to a made-up name, because this kernel does not
+  register that name at all. Source tells you what Apple wrote; only the call tells you what the
+  kernel exposes.
 - Directory host paths only, because a nullfs mount cannot make a single file
   read-only. A file mount must drop `:ro`.
 - Root or passwordless sudo is required, as with PF and network operations. A node

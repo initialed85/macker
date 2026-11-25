@@ -117,15 +117,20 @@ func TestReadOnlyMountGuidanceCarriesTheOperatorChecklist(t *testing.T) {
 		"null is Linux's name for this filesystem while nullfs is Darwin's",
 		"`sysctl vfs.generic` is not the registry",
 		"MACKER_MOUNT_NULLFS",
-		// bindfs is named because it is the other bind-mount VFS Apple still ships, and
-		// an operator who has just been told no nullfs helper exists will reach for it.
-		// The entitlement name is pinned so the claim stays checkable against
-		// bsd/miscfs/bindfs/bind_vfsops.c, and the provenance marker is pinned in the
-		// same list because this clause is a source reading rather than a node
-		// measurement: the day somebody measures it the wording has to change, and a
-		// test that only checked the entitlement name would not notice.
+		// bindfs is named because an operator told "no nullfs helper exists" reaches for the
+		// other bind-mount VFS. home-ops measured it on icarus-2 with maclet's name probe and
+		// the answer was the other branch: the type name bindfs draws ENODEV (19) in all three
+		// mount-data shapes, identically to a made-up name, so this kernel registers no bindfs
+		// even though Apple's source for the same generation carries the code and gates its
+		// mount entry point behind com.apple.private.bindfs-allow. Both halves are pinned so
+		// the text keeps the distinction a lone source reading collapsed.
 		"com.apple.private.bindfs-allow",
-		"read from source rather than measured on this node",
+		"the type name bindfs is not registered at all",
+		"reading that file alone cannot tell you the shipping kernel does not expose the name",
+		// A "bad spec" claim has to name the data shape it drew: apfs answers EFAULT for a
+		// plain string or a nil spec and EINVAL once a conf and a target path are passed.
+		"EFAULT (14) against apfs",
+		"name the data shape it used",
 		"macker volumes --probe",
 		"ls -l /sbin/mount_nullfs",
 		"/Library/Filesystems/nullfs.fs",

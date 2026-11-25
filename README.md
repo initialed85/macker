@@ -509,12 +509,16 @@ Darwin generation still contains nullfs as a filesystem, and its mount entry poi
 returns `EPERM` unless the calling task holds `com.apple.private.nullfs_allow`, with
 no fallback for root, while its unmount entry point accepts root. Measured on icarus-2
 (macOS 26.6.2) with `mount(2)` run as root: `devfs` mounts and releases through the
-same call form, `apfs`, `hfs`, `autofs` and `lifs` draw `EINVAL` for a bad spec, `nfs`
+same call form, `apfs` draws `EFAULT` (14) for a plain string spec or a nil one and
+`EINVAL` (22) once a conf and a target path are passed together - so a "bad spec" result
+has to name the data shape it used - while `hfs`, `autofs` and `lifs` drew `EINVAL` in the
+shapes tried, `bindfs` draws `ENODEV` (19) in all three shapes, identically to `null` and to
+a made-up name, `nfs`
 draws `EPROGMISMATCH` (75 on Darwin, which Linux numbers as `EOVERFLOW`), a made-up name and the type `null` both draw errno 19, and
 `nullfs` draws `EPERM` - three runs, same answer. So the filesystem is present and
 policy-gated rather than absent, and the gate is one a third-party helper cannot
 satisfy. `nullfs` draws `EPERM` even with no mount data passed at all, so the refusal is
-at the vfs entry point and not an artefact of a malformed spec. Four traps cost this
+at the vfs entry point and not an artefact of a malformed spec. Five traps cost this
 conclusion being wrong here once and are worth knowing
 before re-measuring: errno 19 is `ENODEV` on **both** Darwin and Linux, and Apple's own
 description of `ENODEV` reads "operation not supported by device", which is exactly why
@@ -529,7 +533,11 @@ comparing a `statfs` `Mntonname` against the `/tmp/...` you passed answers "not 
 for a mount that is live and it never gets released (six read-only `devfs` mounts got
 stranded on a node that way); and `mount(8)` accepts both `nullfs` and `null` as type
 names, each failing with exit 72 while looking for a bundle - `nullfs.fs` and `null.fs`
-respectively - so a `mount -t` failure says nothing about the kernel. `macker volumes --probe` is what turns the question
+respectively - so a `mount -t` failure says nothing about the kernel; and a source tree is
+not a registry - Apple's source for this generation contains bindfs and gates `bindfs_mount()`
+behind `com.apple.private.bindfs-allow`, yet `mount(2)` on this node answers `ENODEV` (19) for
+the name `bindfs` in every data shape, because the shipping kernel does not register that name
+at all. `macker volumes --probe` is what turns the question
 into a per-node answer instead of an OS guess, and it needs a call form that reaches
 the vfs layer at all: pass the four arguments to syscall 167 directly rather than a
 struct pointer, which draws `EFAULT` for every type on macOS 26 arm64. Macker is

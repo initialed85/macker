@@ -257,7 +257,17 @@ working around them:
   route - the bundle, `mount_null`, `mount_nullfs` - was removed and the kernel route was
   gated. Reopening it needs a helper that calls
   `mount(2)` with the type `nullfs` **and** holds that entitlement, which a third-party
-  binary cannot obtain. Nothing on the node serves as one: `/Library/Filesystems`
+  binary cannot obtain. `bindfs` is the other bind-mount VFS Apple still ships in this
+  generation and it is gated the same way: `bsd/miscfs/bindfs/bind_vfsops.c` defines
+  `BINDFS_ENTITLEMENT "com.apple.private.bindfs-allow"`, `bindfs_mount()` returns `EPERM`
+  unless the caller holds it, and the mount forces `MNT_RDONLY`. That sentence is read from
+  source for xnu-12377.121.6 rather than measured on this node - maclet added `bindfs` to
+  their name probe so the next node access turns it into a measurement - and it is why
+  reaching for a bindfs bind mount after being told no nullfs helper exists walks into the
+  same door. The `EPERM`-even-with-no-mount-data claim above is likewise structural rather
+  than merely observed: in `nullfs_mount` the entitlement check runs before the `copyin` of
+  the mount conf and before the `copyinstr` of the target path, so a better-formed spec buys
+  an operator nothing. Nothing on the node serves as one: `/Library/Filesystems`
   contains only `NetFSPlugins`, the sealed `/System/Library/Filesystems` ships 17
   bundles with no `null.fs` or `nullfs.fs` among them, and no `mount_null*` exists in
   `/sbin`, `/usr/sbin` or `/usr/bin`. `mount(8)` does accept both type names on this OS

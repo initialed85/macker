@@ -117,6 +117,15 @@ func TestReadOnlyMountGuidanceCarriesTheOperatorChecklist(t *testing.T) {
 		"null is Linux's name for this filesystem while nullfs is Darwin's",
 		"`sysctl vfs.generic` is not the registry",
 		"MACKER_MOUNT_NULLFS",
+		// bindfs is named because it is the other bind-mount VFS Apple still ships, and
+		// an operator who has just been told no nullfs helper exists will reach for it.
+		// The entitlement name is pinned so the claim stays checkable against
+		// bsd/miscfs/bindfs/bind_vfsops.c, and the provenance marker is pinned in the
+		// same list because this clause is a source reading rather than a node
+		// measurement: the day somebody measures it the wording has to change, and a
+		// test that only checked the entitlement name would not notice.
+		"com.apple.private.bindfs-allow",
+		"read from source rather than measured on this node",
 		"macker volumes --probe",
 		"ls -l /sbin/mount_nullfs",
 		"/Library/Filesystems/nullfs.fs",

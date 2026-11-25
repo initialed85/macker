@@ -446,7 +446,8 @@ mount null, the same `--probe` prints `read-only volumes: supported`,
 
 The first line is a stable marker — `read-only volumes: supported` or
 `read-only volumes: refused` — and `--format json` reports `read_only_supported`,
-`nullfs_bundle_found`, `probed`, `probe_status`, the `probe` record (`status`,
+`nullfs_bundles`, `nullfs_bundle_found`, `nullfs_bundle_path`, `probed`,
+`probe_status`, the `probe` record (`status`,
 `mount_form`, `mount_point`,
 `mount_error`, `write_error`, `unmount_error`, `unmount_attempts`), the helpers
 resolved, the mount forms that would run, the reason, and `guidance`. `probe_status` is the machine-readable
@@ -485,17 +486,24 @@ privilege a real `:ro` volume needs, so an unprivileged probe reports `refused`
 rather than guessing. A mount that succeeds but still accepts writes is reported as
 `refused`, and a mount that cannot be released is reported with the exact command to
 release it. On macOS 26 mount-based enforcement needs a helper that calls `mount(2)`
-with the `null` filesystem type, named with `MACKER_MOUNT_NULLFS`, and that helper
-must also hold a private Apple entitlement: Apple's source for this Darwin generation
-still contains nullfs as a filesystem, but its mount entry point returns `EPERM` unless
-the calling task holds `com.apple.private.nullfs_allow`, with no fallback for root, while
-its unmount entry point accepts root. The stronger measured fact is that the built
-kernel does not offer the filesystem at all: home-ops's calibrated `mount(2)` probe on
-icarus-2 (macOS 26.6.2) mounts `devfs` through the same call form, draws `EINVAL` from
-`apfs` and `hfs` for a bogus spec, and returns `ENODEV` for `null` - byte-for-byte the
-answer a made-up filesystem name draws - so macOS 26 registers no nullfs vfs and the
-entitlement route is moot there. `macker volumes --probe` is what turns that into a
-per-node answer instead of an OS guess. Macker is
+with the **`nullfs`** filesystem type - the name this kernel registers, not `null` -
+and that helper must also hold a private Apple entitlement. Apple's source for this
+Darwin generation still contains nullfs as a filesystem, and its mount entry point
+returns `EPERM` unless the calling task holds `com.apple.private.nullfs_allow`, with
+no fallback for root, while its unmount entry point accepts root. Measured on icarus-2
+(macOS 26.6.2) with `mount(2)` run as root: `devfs` mounts and releases through the
+same call form, `apfs`, `hfs`, `autofs` and `lifs` draw `EINVAL` for a bad spec, `nfs`
+draws a version error, a made-up name and the type `null` both draw errno 19, and
+`nullfs` draws `EPERM` - three runs, same answer. So the filesystem is present and
+policy-gated rather than absent, and the gate is one a third-party helper cannot
+satisfy. Two traps cost this conclusion being wrong here once and are worth knowing
+before re-measuring: errno 19 on Darwin is `ENOTSUP`, "operation not supported by
+device", not `ENODEV`, "no such device"; and `sysctl vfs.generic` is not the registry -
+it lists `apfs autofs hfs lifs nfs` on this node and omits `devfs`, which mounts fine,
+so a missing oid proves nothing. `macker volumes --probe` is what turns the question
+into a per-node answer instead of an OS guess, and it needs a call form that reaches
+the vfs layer at all: pass the four arguments to syscall 167 directly rather than a
+struct pointer, which draws `EFAULT` for every type on macOS 26 arm64. Macker is
 stdlib-only Go and Go defines no `Mount` wrapper for darwin, though it does define
 `SYS_MOUNT = 167` and `SYS_UNMOUNT = 159` there, so the syscall is not the obstacle.
 Macker will use such a helper when one exists and refuses `:ro` when it does not. `:rw` and any other

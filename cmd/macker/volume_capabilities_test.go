@@ -15,13 +15,20 @@ import (
 
 func useNullfsBundle(t *testing.T, exists bool) {
 	t.Helper()
-	original := nullfsBundlePath
-	t.Cleanup(func() { nullfsBundlePath = original })
+	original := nullfsBundlePaths
+	t.Cleanup(func() { nullfsBundlePaths = original })
 	if exists {
-		nullfsBundlePath = t.TempDir()
+		bundle := filepath.Join(t.TempDir(), "nullfs.fs")
+		if err := os.MkdirAll(bundle, 0o755); err != nil {
+			t.Fatalf("create the stand-in null filesystem bundle: %v", err)
+		}
+		nullfsBundlePaths = []string{bundle}
 		return
 	}
-	nullfsBundlePath = filepath.Join(t.TempDir(), "null.fs")
+	nullfsBundlePaths = []string{
+		filepath.Join(t.TempDir(), "nullfs.fs"),
+		filepath.Join(t.TempDir(), "null.fs"),
+	}
 }
 
 func restrictMountSearch(t *testing.T, nullfsHelpers, mountHelpers []string) {
@@ -46,9 +53,10 @@ func TestReadOnlyMountBlockageStaysShortAndMakesNoPromise(t *testing.T) {
 	blockage := readOnlyMountBlockage("darwin")
 	for _, want := range []string{
 		"no null filesystem bundle",
-		nullfsBundlePath,
-		"no mount_nullfs exists",
-		"does not register the null filesystem",
+		// Both bundle names mount(8) would look for, by name, so a reader can ls them.
+		"nullfs.fs or null.fs",
+		"no mount_nullfs helper exists",
+		"EPERM for the type nullfs",
 		"Run this workload without :ro",
 	} {
 		if !strings.Contains(blockage, want) {
@@ -93,12 +101,18 @@ func TestReadOnlyMountGuidanceCarriesTheOperatorChecklist(t *testing.T) {
 		// Named exactly so a reader can check it against xnu's
 		// bsd/miscfs/nullfs/null_vfsops.c.
 		"com.apple.private.nullfs_allow",
-		"no superuser fallback",
-		"ENODEV",
+		"no fallback for root",
+		"registered under the type name nullfs, not null",
+		"EPERM for nullfs",
+		// The two traps that produced the wrong conclusion the first time this was
+		// measured on this node.
+		"errno 19 on Darwin is ENOTSUP",
+		"`sysctl vfs.generic` is not the registry",
 		"MACKER_MOUNT_NULLFS",
 		"macker volumes --probe",
 		"ls -l /sbin/mount_nullfs",
-		nullfsBundlePath,
+		"/Library/Filesystems/nullfs.fs",
+		"/sbin/mount -t nullfs -o ro SOURCE TARGET",
 	} {
 		if !strings.Contains(guidance, want) {
 			t.Fatalf("guidance = %q, want it to contain %q", guidance, want)
@@ -110,7 +124,7 @@ func TestReadOnlyMountGuidanceCarriesTheOperatorChecklist(t *testing.T) {
 	}
 
 	useNullfsBundle(t, true)
-	if got := readOnlyMountGuidance("darwin"); !strings.Contains(got, "the null filesystem bundle exists") || !strings.Contains(got, "macker volumes --probe") {
+	if got := readOnlyMountGuidance("darwin"); !strings.Contains(got, "exists on this node") || !strings.Contains(got, "macker volumes --probe") {
 		t.Fatalf("guidance = %q, want a node that has the bundle to get the confirmation commands rather than the macOS 26 story", got)
 	}
 

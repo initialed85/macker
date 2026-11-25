@@ -15,22 +15,41 @@ import (
 	"time"
 )
 
-// nullfsBundlePath is where macOS keeps the bundle that mount(8) uses to mount a
-// filesystem type. home-ops measured on icarus-2 (macOS 26.6.2, Darwin 25G83)
-// that /Library/Filesystems/null.fs is gone, so mount(8) fails before it reaches
-// the kernel:
+// nullfsBundlePaths are the bundles mount(8) looks for when asked to mount a null
+// filesystem. The type name this Darwin generation registers is nullfs - measured on
+// icarus-2 (macOS 26.6.2, Darwin 25.6.0, arm64) with mount(2) run as root: the type
+// null draws the same errno a made-up name draws, while nullfs reaches a mount entry
+// point that answers EPERM - and Apple's source names the mount helper's bundle
+// null.fs, so both names are checked. home-ops measured, and I reproduced, that
+// neither bundle exists on macOS 26.6.2, so mount(8) fails before it reaches the
+// kernel for either type name:
 //
 //	mount: exec /Library/Filesystems/null.fs/Contents/Resources/mount_null for /private/tmp/mdst: No such file or directory
 //	mount: /private/tmp/mdst failed with 72
 //
-// It is a variable so a test can point it at a directory that exists.
-var nullfsBundlePath = "/Library/Filesystems/null.fs"
+// They are variables so a test can point them at a directory that exists.
+var nullfsBundlePaths = []string{"/Library/Filesystems/nullfs.fs", "/Library/Filesystems/null.fs"}
 
-// nullfsBundleFound reports whether this node's OS still ships the bundle
-// mount(8) needs for the null filesystem type.
-func nullfsBundleFound() bool {
-	info, err := os.Stat(nullfsBundlePath)
-	return err == nil && info.IsDir()
+// nullfsBundleFound returns the bundle that exists on this node, or an empty string
+// when none does.
+func nullfsBundleFound() string {
+	for _, candidate := range nullfsBundlePaths {
+		info, err := os.Stat(candidate)
+		if err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// nullfsBundleSearchText names the bundles Macker looked for, by bundle name, so a
+// reader can check the claim on their own node with ls.
+func nullfsBundleSearchText() string {
+	names := make([]string, 0, len(nullfsBundlePaths))
+	for _, candidate := range nullfsBundlePaths {
+		names = append(names, filepath.Base(candidate))
+	}
+	return strings.Join(names, " or ")
 }
 
 // readOnlyMountBlockage returns the reason Macker cannot enforce a read-only
@@ -56,10 +75,10 @@ func readOnlyMountBlockage(hostOS string) string {
 	if os.Getenv("MACKER_MOUNT_NULLFS") != "" {
 		return ""
 	}
-	if nullfsBundleFound() {
+	if nullfsBundleFound() != "" {
 		return ""
 	}
-	return fmt.Sprintf("this macOS has no null filesystem bundle at %s, so mount(8) has no helper for the null filesystem type and no mount_nullfs exists; a calibrated mount(2) probe on macOS 26.6.2 shows this kernel does not register the null filesystem at all, so no helper can mount it here. Run this workload without :ro", nullfsBundlePath)
+	return fmt.Sprintf("this macOS ships no null filesystem bundle (looked for a bundle named %s under /Library/Filesystems) and no mount_nullfs helper exists, and mount(2) as root draws EPERM for the type nullfs because Apple gates that mount entry point behind a private entitlement no third-party helper can hold. Run this workload without :ro", nullfsBundleSearchText())
 }
 
 // readOnlyMountGuidance is the operator-facing diagnosis: what to check on the
@@ -71,10 +90,10 @@ func readOnlyMountGuidance(hostOS string) string {
 	if hostOS != "darwin" {
 		return fmt.Sprintf("a Darwin node is required for a read-only volume; on this host Macker refuses :ro rather than approximating it with a permission change or a symlink. Check the mount helpers with ls -l /sbin/mount_nullfs, or name one with MACKER_MOUNT_NULLFS and its partner MACKER_UMOUNT")
 	}
-	if nullfsBundleFound() {
-		return fmt.Sprintf("the null filesystem bundle exists at %s; confirm the mount helpers with ls -l /sbin/mount_nullfs and `sudo /sbin/mount -t null -o ro SOURCE TARGET`, or name them with MACKER_MOUNT_NULLFS and MACKER_UMOUNT. `macker volumes --probe` answers with a mount this kernel accepted and a write it refused", nullfsBundlePath)
+	if found := nullfsBundleFound(); found != "" {
+		return fmt.Sprintf("the null filesystem bundle %s exists on this node; confirm the mount helpers with ls -l /sbin/mount_nullfs and `sudo /sbin/mount -t nullfs -o ro SOURCE TARGET`, or name them with MACKER_MOUNT_NULLFS and MACKER_UMOUNT. `macker volumes --probe` answers with a mount this kernel accepted and a write it refused", found)
 	}
-	return fmt.Sprintf("Apple's source for this Darwin generation still carries nullfs, but its mount entry point requires the private entitlement com.apple.private.nullfs_allow and has no superuser fallback, so a helper would need that entitlement as well as root - and a calibrated mount(2) probe on macOS 26.6.2 (devfs mounts through the same call form, apfs and hfs draw EINVAL for a bogus spec) returns ENODEV for the type null, the same class a made-up filesystem name draws, so the built kernel registers no nullfs vfs and the entitlement route is moot. Check with ls -l /sbin/mount_nullfs, ls -d %s and `sudo /sbin/mount -t null -o ro SOURCE TARGET`; MACKER_MOUNT_NULLFS names a helper that calls mount(2) directly and is exempt from the bundle check, which is the route to test if a future OS registers the filesystem again; `macker volumes --probe` reports a verdict from a mount the kernel accepted and a write it refused", nullfsBundlePath)
+	return "The filesystem is registered under the type name nullfs, not null. A calibrated mount(2) probe run as root on macOS 26.6.2 (Darwin 25.6.0, arm64) mounts devfs through the same four-argument call form and releases it again, draws EINVAL for a bad spec against apfs, hfs, autofs and lifs, a version error for nfs, the same errno for a made-up name and for the type null, and EPERM for nullfs - three runs, same answer. EPERM from the vfs mount entry point is what Apple's source for this Darwin generation predicts: null_mount returns EPERM unless the calling task holds com.apple.private.nullfs_allow, with no fallback for root, so a helper needs that entitlement as well as root and a third-party binary cannot obtain it. Two traps for anyone re-running this: errno 19 on Darwin is ENOTSUP, \"operation not supported by device\", not ENODEV \"no such device\", so a probe that prints 19 found an unregistered name rather than an absent filesystem; and `sysctl vfs.generic` is not the registry - on this node it lists apfs autofs hfs lifs nfs and omits devfs, which mounts and unmounts fine, so a missing oid proves nothing. Check with ls -l /sbin/mount_nullfs, ls -d /Library/Filesystems/nullfs.fs /Library/Filesystems/null.fs and `sudo /sbin/mount -t nullfs -o ro SOURCE TARGET`; MACKER_MOUNT_NULLFS names a helper that calls mount(2) with the type nullfs directly and is exempt from the bundle check, which is the route to test if you ever hold an entitled helper; `macker volumes --probe` reports a verdict from a mount the kernel accepted and a write it refused"
 }
 
 // volumeCapabilityReport answers, for a caller such as a node agent, whether a
@@ -87,10 +106,12 @@ type volumeCapabilityReport struct {
 	Helpers           []string `json:"helpers"`
 	MountForms        []string `json:"mount_forms"`
 	SearchPaths       []string `json:"search_paths"`
-	NullfsBundle      string   `json:"nullfs_bundle"`
+	NullfsBundles     []string `json:"nullfs_bundles"`
 	NullfsBundleFound bool     `json:"nullfs_bundle_found"`
-	WritableMechanism string   `json:"writable_mechanism"`
-	Reason            string   `json:"reason"`
+	// NullfsBundlePath is the bundle that actually exists, empty when none does.
+	NullfsBundlePath  string `json:"nullfs_bundle_path,omitempty"`
+	WritableMechanism string `json:"writable_mechanism"`
+	Reason            string `json:"reason"`
 	// Guidance is the operator checklist. It is kept separate from Reason because
 	// a node agent puts Reason in a Pod status, and a Pending Pod is not where a
 	// node operator's checklist belongs.
@@ -195,7 +216,7 @@ func volumeCapabilities(hostOS, hostArch string) volumeCapabilityReport {
 		ProbeStatus:       "not_requested",
 		MountForms:        []string{},
 		SearchPaths:       append(append([]string{}, mountNullfsCandidatePaths...), mountHelperCandidatePaths...),
-		NullfsBundle:      nullfsBundlePath,
+		NullfsBundles:     append([]string(nil), nullfsBundlePaths...),
 		Guidance:          readOnlyMountGuidance(hostOS),
 		WritableMechanism: "live symlink to the host path, no mount required",
 	}
@@ -207,11 +228,14 @@ func volumeCapabilities(hostOS, hostArch string) volumeCapabilityReport {
 	if blockage := readOnlyMountBlockage(hostOS); blockage != "" {
 		report.Reason = blockage
 		if hostOS == "darwin" {
-			report.NullfsBundleFound = nullfsBundleFound()
+			report.NullfsBundleFound = nullfsBundleFound() != ""
 		}
 		return report
 	}
-	report.NullfsBundleFound = nullfsBundleFound()
+	if found := nullfsBundleFound(); found != "" {
+		report.NullfsBundleFound = true
+		report.NullfsBundlePath = found
+	}
 	attempts, err := nullfsMountAttempts("HOST", "CONTAINER")
 	if err != nil {
 		report.Reason = err.Error()
@@ -416,13 +440,16 @@ func renderVolumeCapabilities(report volumeCapabilityReport) string {
 	}
 	fmt.Fprintf(&out, "host: %s/%s\n", report.HostOS, report.HostArch)
 	fmt.Fprintf(&out, "mechanism: %s\n", report.Mechanism)
-	fmt.Fprintf(&out, "nullfs bundle: %s (found: %t)\n", report.NullfsBundle, report.NullfsBundleFound)
+	fmt.Fprintf(&out, "nullfs bundles searched: %s (found: %t)\n", strings.Join(report.NullfsBundles, ", "), report.NullfsBundleFound)
+	if report.NullfsBundlePath != "" {
+		fmt.Fprintf(&out, "nullfs bundle found: %s\n", report.NullfsBundlePath)
+	}
 	if len(report.Helpers) > 0 {
 		resolved := strings.Join(report.Helpers, ", ")
 		if report.HostOS == "darwin" && !report.NullfsBundleFound {
 			// Naming a helper that exists without saying what it cannot do is how a
 			// reader concludes a node can mount null. maclet flagged this line.
-			resolved += fmt.Sprintf(" (found, but mount(8) needs %s to mount the null type, so a found helper proves nothing here)", nullfsBundlePath)
+			resolved += fmt.Sprintf(" (found, but mount(8) needs a null filesystem bundle (%s) to mount the null type, so a found helper proves nothing here)", strings.Join(nullfsBundlePaths, ", "))
 		}
 		fmt.Fprintf(&out, "mount helpers resolved: %s\n", resolved)
 	} else {

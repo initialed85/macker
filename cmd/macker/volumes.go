@@ -189,6 +189,14 @@ var mountHelperCandidatePaths = []string{
 	"/usr/bin/mount",
 }
 
+// nullfsTypeNames are the filesystem type names Macker asks mount(8) for, in the
+// order it tries them. nullfs comes first because it is the name this Darwin
+// generation registers: run as root through mount(2) on macOS 26.6.2, the type null
+// draws the same errno a made-up name draws, while nullfs reaches a mount entry point
+// that answers EPERM. null is kept because older macOS named the type that way and a
+// node with an older bundle layout is the one that would need it.
+var nullfsTypeNames = []string{"nullfs", "null"}
+
 // nullfsMountAttempts returns the mount commands Macker tries, most specific
 // first: the nullfs helper in its documented option placement, the same helper
 // with options trailing, then mount(8) asked for the null filesystem type. The
@@ -209,13 +217,15 @@ func nullfsMountAttempts(hostPath, target string) ([]mountAttempt, error) {
 		)
 	}
 	for _, binary := range resolveHelper(mountHelperCandidatePaths, "mount") {
-		attempts = append(attempts,
-			mountAttempt{Binary: binary, Args: []string{"-t", "null", "-o", "ro", hostPath, target}},
-			mountAttempt{Binary: binary, Args: []string{"-t", "null", hostPath, target, "-o", "ro"}},
-		)
+		for _, typeName := range nullfsTypeNames {
+			attempts = append(attempts,
+				mountAttempt{Binary: binary, Args: []string{"-t", typeName, "-o", "ro", hostPath, target}},
+				mountAttempt{Binary: binary, Args: []string{"-t", typeName, hostPath, target, "-o", "ro"}},
+			)
+		}
 	}
 	if len(attempts) == 0 {
-		return nil, fmt.Errorf("no mount helper was found: tried %s and LookPath(mount_nullfs), then %s and LookPath(mount); confirm on the node with `ls -l /sbin/mount_nullfs` and `sudo /sbin/mount -t null -o ro SOURCE TARGET`, or name the helper explicitly with MACKER_MOUNT_NULLFS", strings.Join(mountNullfsCandidatePaths, ", "), strings.Join(mountHelperCandidatePaths, ", "))
+		return nil, fmt.Errorf("no mount helper was found: tried %s and LookPath(mount_nullfs), then %s and LookPath(mount); confirm on the node with `ls -l /sbin/mount_nullfs` and `sudo /sbin/mount -t nullfs -o ro SOURCE TARGET`, or name the helper explicitly with MACKER_MOUNT_NULLFS", strings.Join(mountNullfsCandidatePaths, ", "), strings.Join(mountHelperCandidatePaths, ", "))
 	}
 	return attempts, nil
 }

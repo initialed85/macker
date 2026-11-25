@@ -221,28 +221,60 @@ working around them:
 - A nullfs mount path that this macOS release actually provides. home-ops measured
   icarus-2 (macOS 26.6.2, Darwin 25G83): `/Library/Filesystems/null.fs` is gone, so
   `mount(8)` cannot reach the null filesystem type - it fails while looking for the
-  type's helper, with exit 72, before the kernel is consulted. Macker refuses `:ro`
-  there and the container never starts. The refusal is the guarantee: Macker never
+  type's helper, with exit 72, before the kernel is consulted. The same is true of the
+  type name this kernel actually registers: `mount -t nullfs` fails the same way
+  looking for `nullfs.fs`. Macker tries both names (`nullfs` first, then `null`) and
+  refuses `:ro` when neither resolves. The refusal is the guarantee: Macker never
   reports a read-only volume it could not enforce.
-- Whether that refusal can be undone is answered by Apple's own source, not by a
-  probe. The xnu generation matching Darwin 25 still ships nullfs as a filesystem
-  (`bsd/miscfs/nullfs/`), and its mount entry point opens with
+- What closes the route is a policy gate in the kernel, not the absence of the
+  filesystem, and the type name matters. Measured on icarus-2 with `mount(2)` run as
+  root through syscall 167, one mount point, one source directory, three repeat runs
+  of the discriminating names:
+
+  | type asked for | answer |
+  | --- | --- |
+  | `devfs` (control) | mounted, then released |
+  | `apfs`, `hfs`, `autofs`, `lifs` | `EINVAL` - registered, bad spec |
+  | `nfs` | errno 75 - registered, userspace data version rejected |
+  | `bogusxyz` | errno 19 |
+  | `null` | errno 19, byte-for-byte the answer a made-up name draws |
+  | `nullfs` | `EPERM` - 1, three runs out of three |
+
+  `nullfs` is the only name in that table that draws a refusal other than "no such
+  filesystem type", which is what Apple's source for this Darwin generation predicts:
+  nullfs is still there (`bsd/miscfs/nullfs/`) and its mount entry point opens with
   `if (!IOCurrentTaskHasEntitlement("com.apple.private.nullfs_allow")) return EPERM;`
-  with no superuser fallback, while its unmount entry point accepts the entitlement
-  *or* superuser. So the filesystem looks like it is still in the kernel and only
-  the userland route - the bundle, `mount_null`, `mount_nullfs` - was removed, and
-  reopening it needs a helper holding a private Apple entitlement, not merely a
-  helper that knows the ABI. For the record the ABI is now known rather than
-  guessed: syscall 167 with `struct mount_args { char *type; char *path; int flags;
-  caddr_t data; }` - fstype first, mount point second, and the source directory in
-  `data` as a `struct null_mount_conf { uint64_t flags }` followed by the
-  NUL-terminated path. Macker is stdlib-only Go, and Go defines no `Mount` wrapper
-  for darwin, but it does define `SYS_MOUNT = 167` and `SYS_UNMOUNT = 159` in its
-  darwin tables, so the raw call is reachable from Go; the entitlement, not the
-  language, is what blocks it. `MACKER_MOUNT_NULLFS` names a helper for a node that
-  does have one. macOS nullfs also forces `MNT_RDONLY` (with `MNT_NOSUID`,
-  `MNT_DONTBROWSE` and `MNT_MULTILABEL`) on every mount, so it could only ever serve
-  `:ro` and never a writable volume.
+  with no fallback for root, while its unmount entry point accepts the entitlement
+  *or* superuser. So the userland route - the bundle, `mount_null`, `mount_nullfs` -
+  was removed and the kernel route was gated. Reopening it needs a helper that calls
+  `mount(2)` with the type `nullfs` **and** holds that entitlement, which a third-party
+  binary cannot obtain. Nothing on the node serves as one: `/Library/Filesystems`
+  contains only `NetFSPlugins`, the sealed `/System/Library/Filesystems` ships 17
+  bundles with no `null.fs` or `nullfs.fs` among them, and no `mount_null*` exists in
+  `/sbin`, `/usr/sbin` or `/usr/bin`.
+- Two measurement traps that produced the wrong conclusion here once, recorded
+  because both are easy to fall into again. First, **errno 19 on Darwin is `ENOTSUP`,
+  "operation not supported by device", not `ENODEV`, "no such device"** (Linux numbers
+  them the other way round); a probe that prints 19 found an unregistered *name*, and
+  that is exactly how "the kernel registers no nullfs at all" got reported here. It is
+  false: `nullfs` is registered and answers `EPERM`. Second, **`sysctl vfs.generic` is
+  not the filesystem registry**: on this node it lists `apfs autofs hfs lifs nfs` and
+  omits `devfs`, which mounts and unmounts fine, so `sysctl vfs.generic.nullfs`
+  reporting an unknown oid proves nothing. The mount(2) errno classes above are the
+  discriminator. Third, the ABI you use decides whether you reach the vfs layer at
+  all: the four-argument form `syscall(SYS_MOUNT, type, mount_point, flags, data)`
+  works on macOS 26 arm64 (the `devfs` control above mounts through it), while the
+  struct-pointer form `syscall(SYS_MOUNT, &struct mount_args, 0, 0)` used by the helper
+  left at `/tmp/mnull3.c` on that node draws `EFAULT` for every type including `devfs`.
+  Pass the arguments directly: fstype first, mount point second, and the source
+  directory in `data` as a `struct null_mount_conf { uint64_t flags }` followed by the
+  NUL-terminated path. Macker is stdlib-only Go, and Go defines no `Mount` wrapper for
+  darwin but does define `SYS_MOUNT = 167` and `SYS_UNMOUNT = 159` in its darwin
+  tables, so the raw call is reachable from Go; the entitlement, not the language, is
+  what blocks it. `MACKER_MOUNT_NULLFS` names a helper for a node that does have one.
+  macOS nullfs also forces `MNT_RDONLY` (with `MNT_NOSUID`, `MNT_DONTBROWSE` and
+  `MNT_MULTILABEL`) on every mount, so it could only ever serve `:ro` and never a
+  writable volume.
 - Directory host paths only, because a nullfs mount cannot make a single file
   read-only. A file mount must drop `:ro`.
 - Root or passwordless sudo is required, as with PF and network operations. A node

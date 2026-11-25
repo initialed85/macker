@@ -475,7 +475,7 @@ func TestReadOnlyMountFallsBackToMountWithNullFilesystemType(t *testing.T) {
 	if err := installVolume(rootfs, mount); err != nil {
 		t.Fatalf("mount(8) with the null filesystem type must be attempted: %v", err)
 	}
-	want := []string{"-t", "null", "-o", "ro", host, filepath.Join(rootfs, "data")}
+	want := []string{"-t", "nullfs", "-o", "ro", host, filepath.Join(rootfs, "data")}
 	if got := readHelperLog(t, helperLog); !reflect.DeepEqual(got, want) {
 		t.Fatalf("mount invocation = %q, want %q", got, want)
 	}
@@ -509,7 +509,7 @@ func TestReadOnlyMountNamesEveryHelperItTried(t *testing.T) {
 		"/sbin/mount",
 		"LookPath(mount)",
 		"ls -l /sbin/mount_nullfs",
-		"sudo /sbin/mount -t null -o ro SOURCE TARGET",
+		"sudo /sbin/mount -t nullfs -o ro SOURCE TARGET",
 		"MACKER_MOUNT_NULLFS",
 	} {
 		if !strings.Contains(message, want) {
@@ -546,6 +546,7 @@ func TestReadOnlyMountReportsEveryAttemptItMade(t *testing.T) {
 	for _, want := range []string{
 		helper + " -o ro " + host + " " + target,
 		helper + " " + host + " " + target + " -o ro",
+		mountHelper + " -t nullfs -o ro " + host + " " + target,
 		mountHelper + " -t null -o ro " + host + " " + target,
 		"null file system not supported",
 		"root or passwordless sudo",
@@ -568,5 +569,45 @@ func TestUmountBinaryResolvesAbsolutePathWithoutPathHelp(t *testing.T) {
 	t.Setenv("MACKER_UMOUNT", "/custom/umount")
 	if got := umountBinary(); got != "/custom/umount" {
 		t.Fatalf("umount binary = %q, want the configured override", got)
+	}
+}
+
+// TestNullfsMountAttemptsAskForTheRegisteredTypeNameFirst records that the order is
+// not cosmetic. mount(2) run as root on macOS 26.6.2 draws the same errno for the type
+// null that it draws for a made-up name, while the type nullfs reaches a mount entry
+// point that answers EPERM. Asking mount(8) for null first would make a node that does
+// have a bundle look unsupported for the wrong reason.
+func TestNullfsMountAttemptsAskForTheRegisteredTypeNameFirst(t *testing.T) {
+	helper, _ := fakeVolumeHelper(t, "mount", "exit 0")
+	originalNullfs := mountNullfsCandidatePaths
+	originalMount := mountHelperCandidatePaths
+	defer func() {
+		mountNullfsCandidatePaths = originalNullfs
+		mountHelperCandidatePaths = originalMount
+	}()
+	mountNullfsCandidatePaths = []string{"/nonexistent/mount_nullfs"}
+	mountHelperCandidatePaths = []string{helper}
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("MACKER_MOUNT_NULLFS", "")
+
+	attempts, err := nullfsMountAttempts("/host", "/target")
+	if err != nil {
+		t.Fatalf("mount attempts: %v", err)
+	}
+	var types []string
+	for _, attempt := range attempts {
+		types = append(types, attempt.Binary+" "+strings.Join(attempt.Args, " "))
+	}
+	if len(types) != 4 {
+		t.Fatalf("attempts = %q, want the nullfs and null type names in both option placements", types)
+	}
+	if !strings.Contains(types[0], "-t nullfs -o ro /host /target") {
+		t.Fatalf("first attempt = %q, want the type name this kernel registers", types[0])
+	}
+	if !strings.Contains(types[2], "-t null -o ro /host /target") {
+		t.Fatalf("attempts = %q, want the older type name tried after it", types)
+	}
+	if got := nullfsBundleSearchText(); got != "nullfs.fs or null.fs" {
+		t.Fatalf("bundle search text = %q, want the bundle names mount(8) looks for, in the order it looks for them", got)
 	}
 }

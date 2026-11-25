@@ -71,6 +71,15 @@ for ref in "${refs[@]}"; do
   fi
 
   text=$(git show "${sha}:${target_file}")
+  # Commit prose is checked too, but only as an advisory. The claim that landed in Pod
+  # status is the one in published source; a commit message legitimately quotes a false
+  # claim in order to refute it - build-41's own message quotes the build-40 sentence it
+  # replaces - so treating a prose hit as a refusal would refuse the honest artifact.
+  # The advisory exists because peer agents quote commit messages as explanations, and
+  # "errno 19 on Darwin is ENOTSUP" survived in this project's commit bodies at build-35
+  # and build-36 after being retracted, which is how it nearly got copied into another
+  # agent's memory graph as a fact.
+  prose=$(git log -1 --format='%s%n%b' "$sha")
   verdicts=()
   tripped=0
   for claim in "${falsified[@]}"; do
@@ -87,7 +96,12 @@ for ref in "${refs[@]}"; do
   done
 
   if [ "${#verdicts[@]}" -eq 0 ]; then
-    printf '%-10s %-10s %-7s %s\n' "$ref" "${sha:0:10}" 'present' 'PUBLISHES NO KNOWN FALSE CLAIM, ALL MARKERS PRESENT'
+    falsified_pattern=$(printf '%s\n' "${falsified[@]}" | paste -sd'|' -)
+    if printf '%s\n' "$prose" | grep -qiE "$falsified_pattern"; then
+      printf '%-10s %-10s %-7s %s\n' "$ref" "${sha:0:10}" 'present' 'CLEAN IN SOURCE, ADVISORY: its commit message quotes a claim measured false (read it before quoting it as an explanation)'
+    else
+      printf '%-10s %-10s %-7s %s\n' "$ref" "${sha:0:10}" 'present' 'PUBLISHES NO KNOWN FALSE CLAIM, ALL MARKERS PRESENT'
+    fi
   else
     printf '%-10s %-10s %-7s %s\n' "$ref" "${sha:0:10}" 'present' "$(IFS='; '; echo "${verdicts[*]}")"
   fi

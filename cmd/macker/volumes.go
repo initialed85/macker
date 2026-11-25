@@ -129,8 +129,12 @@ func installVolume(rootfs string, mount volume) error {
 // every other process on the node while the mount is live. Macker does not
 // pretend a symlink or a permission change can do this.
 func mountReadOnlyVolume(hostPath, target string, mount volume) error {
-	if !nullfsAvailable() {
-		return fmt.Errorf("read-only volume %q requires a Darwin node: current host is %s/%s; Macker enforces :ro with mount_nullfs", mount.containerPath(), runtime.GOOS, runtime.GOARCH)
+	if blockage := readOnlyMountBlockage(runtime.GOOS); blockage != "" {
+		// The reason is stated before any mount is attempted. On Darwin the
+		// decisive fact is measurable without privilege: mount(8) finds a
+		// filesystem type's helper inside /Library/Filesystems/<type>.fs, so a
+		// missing null filesystem bundle is an OS fact, not a lookup failure.
+		return fmt.Errorf("read-only volume %q: %s", mount.containerPath(), blockage)
 	}
 	info, err := os.Stat(hostPath)
 	if err != nil {

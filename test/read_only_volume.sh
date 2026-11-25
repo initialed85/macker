@@ -37,25 +37,18 @@ fail() {
   exit 1
 }
 
-[ "$(uname -s)" = "Darwin" ] || fail "this test enforces mount_nullfs and must run on a Darwin node"
+[ "$(uname -s)" = "Darwin" ] || fail "this test enforces a nullfs mount and must run on a Darwin node"
 [ -x "$MACKER" ] || fail "$MACKER is not executable; run make first"
 
-# Resolve a mount helper the way Macker does, so a failure here names the helper
-# and the privilege problem instead of blaming the test.
-HELPER=""
-for candidate in /sbin/mount_nullfs /usr/sbin/mount_nullfs /usr/local/sbin/mount_nullfs; do
-  if [ -x "$candidate" ]; then
-    HELPER="$candidate"
-    break
-  fi
-done
-if [ -n "$HELPER" ]; then
-  sudo -n "$HELPER" -h >/dev/null 2>&1 || fail "passwordless sudo for $HELPER is required"
-else
-  [ -x /sbin/mount ] || fail "no mount helper on this node: tried /sbin/mount_nullfs, /usr/sbin/mount_nullfs, /usr/local/sbin/mount_nullfs and /sbin/mount"
-  sudo -n /sbin/mount -h >/dev/null 2>&1 || fail "passwordless sudo for /sbin/mount is required"
-  echo "note: no mount_nullfs helper found; Macker will attempt \`mount -t null -o ro\`" >&2
+# Ask Macker what this node can enforce before blaming any workload. The report
+# names the OS fact - a missing null filesystem bundle is not a lookup failure -
+# and every helper it searched.
+CAPABILITY_REPORT="$("$MACKER" volumes 2>&1)"
+if [ "$(printf '%s\n' "$CAPABILITY_REPORT" | head -n 1)" != "read-only volumes: supported" ]; then
+  printf '%s\n' "$CAPABILITY_REPORT" >&2
+  fail "this node cannot enforce a read-only volume; the report above says why"
 fi
+sudo -n /sbin/mount -h >/dev/null 2>&1 || fail "passwordless sudo for /sbin/mount is required to mount a read-only volume"
 
 mkdir -p "$HOST_DIR"
 echo "original" > "$HOST_DIR/payload"

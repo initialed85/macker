@@ -376,7 +376,31 @@ mounts. `MACKER_MOUNT_NULLFS` and `MACKER_UMOUNT` name the helpers explicitly if
 a node keeps them elsewhere. A node with no usable helper reports every command
 it tried and how each was rejected, and refuses the container rather than
 reporting a read-only volume it could not enforce — home-ops measured no
-`mount_nullfs` on icarus-2 (Darwin 25.6, macOS 26). `:rw` and any other
+`mount_nullfs` on icarus-2 (macOS 26.6.2, Darwin 25G83), where
+`/Library/Filesystems/null.fs` is gone and `mount -t null` fails with exit 72
+before the kernel is consulted.
+
+`macker volumes` answers that capability question without mounting anything, so a
+node agent can decide at admission time instead of launching a workload that is
+bound to fail:
+
+```sh
+./bin/macker volumes
+# read-only volumes: refused
+# host: darwin/arm64
+# mechanism: none
+# nullfs bundle: /Library/Filesystems/null.fs (found: false)
+# mount helpers resolved: none (searched /sbin/mount_nullfs, ...)
+# reason: this macOS has no null filesystem bundle at /Library/Filesystems/null.fs, ...
+```
+
+The first line is a stable marker — `read-only volumes: supported` or
+`read-only volumes: refused` — and `--format json` reports `read_only_supported`,
+`nullfs_bundle_found`, the helpers resolved, the mount forms that would run, and
+the reason. On macOS 26 the only route back to mount-based enforcement is a helper
+that calls `mount(2)` with the `null` filesystem type, named with
+`MACKER_MOUNT_NULLFS`: Macker is stdlib-only Go, and Go provides `mount(2)` only on
+Linux, so it cannot mount nullfs by itself. `:rw` and any other
 third field are rejected with an error; writable is the default and needs no
 option. The mount is unmounted on exit, `stop`, `rm` and reconciliation after an
 external kill, and `macker inspect --format json` reports both the requested

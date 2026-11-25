@@ -218,11 +218,15 @@ working around them:
 
 - Darwin nodes only; a Linux node rejects `:ro` rather than pretending to enforce
   it.
-- A usable nullfs mount path on that macOS release. home-ops measured icarus-2
-  (Darwin 25.6, macOS 26) and found no `mount_nullfs` helper, so a node needs
-  either that helper or a nullfs filesystem type usable by `mount(8)`; with
-  neither, Macker refuses `:ro` and the container never starts. The refusal is the
-  guarantee: Macker never reports a read-only volume it could not enforce.
+- A nullfs mount path that this macOS release actually provides. home-ops measured
+  icarus-2 (macOS 26.6.2, Darwin 25G83): `/Library/Filesystems/null.fs` is gone, so
+  `mount(8)` cannot reach the null filesystem type - it fails while looking for the
+  type's helper, with exit 72, before the kernel is consulted. Macker refuses `:ro`
+  there and the container never starts. The refusal is the guarantee: Macker never
+  reports a read-only volume it could not enforce. Whether the kernel still
+  implements nullfs is not answerable from Go, which provides `mount(2)` only on
+  Linux; restoring enforcement on such a node needs a helper that calls `mount(2)`
+  with the `null` filesystem type, named with `MACKER_MOUNT_NULLFS`.
 - Directory host paths only, because a nullfs mount cannot make a single file
   read-only. A file mount must drop `:ro`.
 - Root or passwordless sudo is required, as with PF and network operations. A node
@@ -435,6 +439,10 @@ For this mode:
   pull attempt. Macker never executes a non-Darwin manifest, and there is no plan
   to change that; a Linux-container runtime on a Mac node would require a
   VM-backed runtime rather than this process model.
+- maclet can use `macker volumes --format json` before assigning a `readOnly`
+  hostPath pod, so a node that cannot enforce a read-only mount is reported as
+  unsupported at admission time instead of failing inside a mount attempt. The
+  report answers the capability question without mounting anything.
 
 ## Isolation and trust model
 

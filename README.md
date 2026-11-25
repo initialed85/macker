@@ -448,8 +448,8 @@ The first line is a stable marker — `read-only volumes: supported` or
 `read-only volumes: refused` — and `--format json` reports `read_only_supported`,
 `nullfs_bundle_found`, `probed`, `probe_status`, the `probe` record (`status`,
 `mount_form`, `mount_point`,
-`mount_error`, `write_error`, `unmount_error`), the helpers resolved, the mount
-forms that would run, the reason, and `guidance`. `probe_status` is the machine-readable
+`mount_error`, `write_error`, `unmount_error`, `unmount_attempts`), the helpers
+resolved, the mount forms that would run, the reason, and `guidance`. `probe_status` is the machine-readable
 verdict a node agent should switch on: `not_requested` (no `--probe`),
 `not_attempted_os` (this OS blocks the mount, so no command ran),
 `mount_not_attempted_privilege` (nobody was allowed to try, which says nothing
@@ -457,6 +457,16 @@ about the kernel), `helper_unavailable`, `mount_refused` (the kernel said no),
 `write_accepted` (a mount happened and it did not enforce read-only),
 `unmount_failed` (read-only was enforced and the mount is still live, with the
 command to release it in `reason`), and `enforced`.
+
+The probe retries the release up to three times with backoff, because a brand-new
+local mount on macOS can be held briefly by the node's own directory watchers, and
+one `EBUSY` must not decide a node's capability verdict while leaving a mount live
+under `/tmp`. `unmount_attempts` says how many tries it took, so a node agent can
+tell a lost race from a mount that genuinely will not come off. Whichever verdict a
+probe ends on, a mount it could not release is reported with the live path and the
+exact command to release it - a `write_accepted` probe that also failed to release
+tells you both, because a mount is live on your node whatever it decided about
+read-only.
 
 `reason` is deliberately the short field. maclet copies it into a Pod's status, so
 `kubectl describe pod` on a darwin node shows macker's wording, and a remedy that

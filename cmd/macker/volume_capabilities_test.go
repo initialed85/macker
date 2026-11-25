@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func useNullfsBundle(t *testing.T, exists bool) {
@@ -518,5 +519,112 @@ func TestVolumesCommandProbeFlagReportsTheProbeRecord(t *testing.T) {
 func TestReadOnlyProbeRunnerIsTheRealMountProbe(t *testing.T) {
 	if readOnlyProbeRunner == nil {
 		t.Fatal("readOnlyProbeRunner must default to the real probe")
+	}
+}
+
+// useQuickProbeUnmountRetry shortens the probe's release retries so a test that
+// exercises them does not sit in backoff, and puts the defaults back afterwards.
+func useQuickProbeUnmountRetry(t *testing.T, attempts int) {
+	t.Helper()
+	previousAttempts, previousDelay := probeUnmountAttempts, probeUnmountRetryDelay
+	t.Cleanup(func() {
+		probeUnmountAttempts, probeUnmountRetryDelay = previousAttempts, previousDelay
+	})
+	probeUnmountAttempts = attempts
+	probeUnmountRetryDelay = time.Millisecond
+}
+
+// fakeUmountScript writes a script that answers as umount would, so a test can drive
+// the release path without mounting anything.
+func fakeUmountScript(t *testing.T, name, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+// TestReleaseProbeMountDoesNotCallAMountStuckAfterOneBusy answers a macOS detail
+// neither side can see from the other's description: a brand new local mount can be
+// held by the node's own directory watchers, so one EBUSY must not decide the node's
+// capability verdict while leaving a mount live under a temporary directory.
+func TestReleaseProbeMountDoesNotCallAMountStuckAfterOneBusy(t *testing.T) {
+	useQuickProbeUnmountRetry(t, 3)
+	counter := filepath.Join(t.TempDir(), "attempts")
+	// Busy for the first two attempts, released on the third.
+	script := fakeUmountScript(t, "umount-eventually", "#!/bin/sh\ncount=$(cat \""+counter+"\" 2>/dev/null || echo 0)\ncount=$((count + 1))\necho \"$count\" > \""+counter+"\"\nif [ \"$count\" -lt 3 ]; then\n\tprintf 'umount: %s: Resource busy\\n' \"$1\" >&2\n\texit 1\nfi\nexit 0\n")
+	t.Setenv("MACKER_UMOUNT", script)
+	attempts, failure := releaseProbeMount("/tmp/macker-probe-mnt")
+	if failure != "" {
+		t.Fatalf("release after %d attempts = %q, want the third attempt to succeed", attempts, failure)
+	}
+	if attempts != 3 {
+		t.Fatalf("release attempts = %d, want 3 so the report can say a transient hold was retried", attempts)
+	}
+}
+
+func TestReleaseProbeMountReportsTheAttemptsItNeededToLearnAMountIsStuck(t *testing.T) {
+	useQuickProbeUnmountRetry(t, 3)
+	script := fakeUmountScript(t, "umount-stuck", "#!/bin/sh\nprintf 'umount: %s: Resource busy\\n' \"$1\" >&2\nexit 1\n")
+	t.Setenv("MACKER_UMOUNT", script)
+	attempts, failure := releaseProbeMount("/tmp/macker-probe-mnt")
+	if attempts != 3 {
+		t.Fatalf("release attempts = %d, want every attempt counted when none worked", attempts)
+	}
+	if !strings.Contains(failure, "Resource busy") {
+		t.Fatalf("release failure = %q, want the last answer the node gave", failure)
+	}
+
+	// The verdict and the reason both carry the attempt count, so a node agent sees
+	// a mount that was tried for rather than one that was asked once.
+	probe := readOnlyProbeRun{
+		MountForm: "/sbin/mount -t null -o ro /tmp/s /tmp/t", MountPoint: "/tmp/macker-probe-mnt",
+		WriteError: "permission denied", UnmountAttempts: attempts, UnmountError: failure,
+	}
+	if got := probe.classify(); got != "unmount_failed" {
+		t.Fatalf("classify = %q, want unmount_failed", got)
+	}
+	reason := probe.reason()
+	// The reason names the umount the node actually used, which is the override this
+	// test installed, not the word umount.
+	if !strings.Contains(reason, "after 3 attempts") || !strings.Contains(reason, script+" /tmp/macker-probe-mnt") {
+		t.Fatalf("reason = %q, want it to carry the attempt count and the release command using %s", reason, script)
+	}
+	text := renderVolumeCapabilities(volumeCapabilityReport{
+		HostOS: runtime.GOOS, ReadOnlySupported: false,
+		ProbeStatus: "unmount_failed", Probed: true, Probe: &probe, Reason: reason,
+	})
+	if !strings.Contains(text, "probe unmount: "+failure+" (attempted 3 times)") {
+		t.Fatalf("rendered report = %q, want the unmount line to carry the attempt count", text)
+	}
+}
+
+// TestWriteAcceptedProbeStillReportsALiveMount covers the pairing a verdict alone
+// hides: a probe mount that accepted writes and then would not come off is a live
+// mount on this node, and the reader has to be told how to release it.
+func TestWriteAcceptedProbeStillReportsALiveMount(t *testing.T) {
+	probe := readOnlyProbeRun{
+		MountForm: "/sbin/mount -t null -o ro /tmp/s /tmp/t", MountPoint: "/tmp/macker-probe-mnt",
+		UnmountAttempts: 3, UnmountError: "exit status 1: umount: /tmp/macker-probe-mnt: Resource busy",
+	}
+	if got := probe.classify(); got != "write_accepted" {
+		t.Fatalf("classify = %q, want write_accepted: a mount that stayed writable is a refusal whatever the release did", got)
+	}
+	reason := probe.reason()
+	for _, want := range []string{"was accepted", "still live at /tmp/macker-probe-mnt", "after 3 attempts", "umount /tmp/macker-probe-mnt"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason = %q, want it to contain %q", reason, want)
+		}
+	}
+	text := renderVolumeCapabilities(volumeCapabilityReport{
+		HostOS: runtime.GOOS, ReadOnlySupported: false,
+		ProbeStatus: "write_accepted", Probed: true, Probe: &probe, Reason: reason,
+	})
+	if !strings.Contains(text, "probe unmount: "+probe.UnmountError+" (attempted 3 times)") {
+		t.Fatalf("rendered report = %q, want the live mount reported on its own line too", text)
+	}
+	if !strings.Contains(text, "guidance: ") {
+		t.Fatalf("rendered report = %q, want the operator checklist alongside the verdict", text)
 	}
 }

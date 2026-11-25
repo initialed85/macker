@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // nullfsBundlePath is where macOS keeps the bundle that mount(8) uses to mount a
@@ -106,12 +107,16 @@ type volumeCapabilityReport struct {
 // capability: the mount was accepted, a write inside it was refused, and the
 // mount was released again.
 type readOnlyProbeRun struct {
-	Status       string `json:"status"`
-	MountForm    string `json:"mount_form,omitempty"`
-	MountPoint   string `json:"mount_point,omitempty"`
-	MountError   string `json:"mount_error,omitempty"`
-	WriteError   string `json:"write_error,omitempty"`
-	UnmountError string `json:"unmount_error,omitempty"`
+	Status     string `json:"status"`
+	MountForm  string `json:"mount_form,omitempty"`
+	MountPoint string `json:"mount_point,omitempty"`
+	MountError string `json:"mount_error,omitempty"`
+	WriteError string `json:"write_error,omitempty"`
+	// UnmountAttempts records how many release attempts the probe made, so a
+	// verdict of unmount_failed means a mount that stayed stuck rather than one
+	// that lost a race with the node's own directory watchers.
+	UnmountAttempts int    `json:"unmount_attempts,omitempty"`
+	UnmountError    string `json:"unmount_error,omitempty"`
 }
 
 // classify names the failure mode instead of leaving a caller to read the reason
@@ -163,10 +168,17 @@ func (p readOnlyProbeRun) reason() string {
 	case p.MountError != "":
 		return fmt.Sprintf("probe mount was refused: %s", p.MountError)
 	case p.WriteError == "":
+		if p.UnmountError != "" {
+			// A mount that accepted writes and then would not come off is still a live
+			// mount on this node, and a reader who is only told the verdict would never
+			// learn to release it.
+			return fmt.Sprintf("probe mount %s succeeded, but a file written inside %s was accepted, so a read-only volume would not be enforced; releasing it also failed after %d attempts (%s), so the mount is still live at %s - release it with `sudo %s %s` before removing that directory",
+				p.MountForm, p.MountPoint, p.releaseAttempts(), p.UnmountError, p.MountPoint, umountBinary(), p.MountPoint)
+		}
 		return fmt.Sprintf("probe mount %s succeeded, but a file written inside %s was accepted, so a read-only volume would not be enforced", p.MountForm, p.MountPoint)
 	case p.UnmountError != "":
-		return fmt.Sprintf("probe mount %s enforced read-only (%s), but releasing it failed: %s. Release it with `sudo %s %s` before removing %s",
-			p.MountForm, p.WriteError, p.UnmountError, umountBinary(), p.MountPoint, p.MountPoint)
+		return fmt.Sprintf("probe mount %s enforced read-only (%s), but releasing it failed after %d attempts: %s. Release it with `sudo %s %s` before removing %s",
+			p.MountForm, p.WriteError, p.releaseAttempts(), p.UnmountError, umountBinary(), p.MountPoint, p.MountPoint)
 	default:
 		return fmt.Sprintf("probe mount %s enforced read-only: writing inside %s failed with %s, and the mount was released",
 			p.MountForm, p.MountPoint, p.WriteError)
@@ -252,8 +264,10 @@ func performReadOnlyMountProbe() readOnlyProbeRun {
 			MountPoint: target,
 		}
 		probe.WriteError = probeWriteRefused(target)
-		if _, err := runPrivileged(umountBinary(), target); err != nil {
-			probe.UnmountError = err.Error()
+		releaseCount, unmountFailure := releaseProbeMount(target)
+		probe.UnmountAttempts = releaseCount
+		if unmountFailure != "" {
+			probe.UnmountError = unmountFailure
 			return probe
 		}
 		if err := os.RemoveAll(dir); err != nil {
@@ -263,6 +277,46 @@ func performReadOnlyMountProbe() readOnlyProbeRun {
 	}
 	_ = os.RemoveAll(dir)
 	return readOnlyProbeRun{MountError: strings.Join(failures, "; ")}
+}
+
+// probeUnmountAttempts and probeUnmountRetryDelay bound how hard the probe tries
+// to release the mount it created. A variable pair so a test can retry quickly.
+var (
+	probeUnmountAttempts   = 3
+	probeUnmountRetryDelay = 250 * time.Millisecond
+)
+
+// releaseProbeMount releases the probe mount, retrying briefly with backoff. On
+// macOS a brand new local mount can be held by something that has nothing to do
+// with the workload - the volume metadata or file-system event daemons opening the
+// directory they are watching - and one EBUSY must not decide the node's capability
+// verdict while leaving a mount live under a temporary directory. The attempt count
+// is reported, so a node agent can tell a lost race from a mount that genuinely
+// will not come off.
+func releaseProbeMount(target string) (int, string) {
+	var last string
+	delay := probeUnmountRetryDelay
+	for attempt := 1; attempt <= probeUnmountAttempts; attempt++ {
+		if _, err := runPrivileged(umountBinary(), target); err != nil {
+			last = err.Error()
+			if attempt < probeUnmountAttempts {
+				time.Sleep(delay)
+				delay *= 2
+			}
+			continue
+		}
+		return attempt, ""
+	}
+	return probeUnmountAttempts, last
+}
+
+// releaseAttempts keeps the reason line honest for a probe record that predates the
+// retry counter.
+func (p readOnlyProbeRun) releaseAttempts() int {
+	if p.UnmountAttempts > 0 {
+		return p.UnmountAttempts
+	}
+	return 1
 }
 
 // probeWriteRefused returns the error a write inside a mounted directory drew,
@@ -391,7 +445,7 @@ func renderVolumeCapabilities(report volumeCapabilityReport) string {
 			fmt.Fprintf(&out, "probe write inside the mount: refused with %s\n", report.Probe.WriteError)
 		}
 		if report.Probe.UnmountError != "" {
-			fmt.Fprintf(&out, "probe unmount: %s\n", report.Probe.UnmountError)
+			fmt.Fprintf(&out, "probe unmount: %s (attempted %d times)\n", report.Probe.UnmountError, report.Probe.releaseAttempts())
 		}
 	}
 	fmt.Fprintf(&out, "writable volumes: %s\n", report.WritableMechanism)

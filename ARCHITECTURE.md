@@ -499,7 +499,10 @@ For this mode:
   `reason` is kept short because maclet embeds it in a Pod status - `kubectl describe
   pod` shows macker's wording - and a remedy that cannot work on that OS must not
   appear there. The node operator's checklist is `guidance`, which belongs in node
-  logs instead.
+  logs instead. `unmount_failed` arrives only after three release attempts, so maclet
+  can fail closed on it knowing the mount was tried for, not merely asked once; a
+  probe that could not release its mount reports the live path and the release command
+  whatever verdict it ended on, including `write_accepted`.
 
 ## Isolation and trust model
 

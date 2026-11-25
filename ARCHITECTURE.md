@@ -554,6 +554,12 @@ For this mode:
   on `probe_status` rather than reading the reason as prose: a probe that could not
   run because nobody was allowed to mount (`mount_not_attempted_privilege`) is not
   the same answer as a kernel that refused the filesystem type (`mount_refused`).
+  That split is load-bearing rather than tidy: maclet treats `not_requested` and
+  `mount_not_attempted_privilege` as "no verdict, consult the unproven `volumes`
+  answer", so a sudo-less node must never be reported as if the kernel had refused,
+  and equally a helper that reached the kernel and drew `Operation not permitted` must
+  never be reported as a privilege problem, because then the fallback would skip a real
+  refusal. Both directions are pinned by test cases, not by prose.
   `reason` is kept short because maclet embeds it in a Pod status - `kubectl describe
   pod` shows macker's wording - and a remedy that cannot work on that OS must not
   appear there. The node operator's checklist is `guidance`, which belongs in node

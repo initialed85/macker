@@ -334,6 +334,12 @@ func TestReadOnlyProbeRunClassifiesEveryFailureMode(t *testing.T) {
 		{"no helper exists", readOnlyProbeRun{MountError: "no mount helper was found: tried /sbin/mount_nullfs, /sbin/mount"}, "helper_unavailable"},
 		{"nobody was allowed to try", readOnlyProbeRun{MountError: "mount src dst read-only: root or passwordless sudo is required"}, "mount_not_attempted_privilege"},
 		{"sudo wants a password", readOnlyProbeRun{MountError: "exit status 1: sudo: a password is required"}, "mount_not_attempted_privilege"},
+		// The other way sudo fails without a terminal. Both directions of this split are
+		// load-bearing for a node agent that treats a privilege problem as "no verdict".
+		{"sudo cannot read a password here", readOnlyProbeRun{MountError: "exit status 1: sudo: a terminal is required to read the password; either the media of your current directory is not a terminal, or a password is required"}, "mount_not_attempted_privilege"},
+		// And the opposite direction: a helper that reached the kernel and drew EPERM is
+		// a kernel verdict, never an excuse to report "nobody was allowed to try".
+		{"kernel refused with EPERM after a real attempt", readOnlyProbeRun{MountPoint: "/tmp/mnt", MountError: "/sbin/mount_nullfs -o ro src dst: mount: nullfs: Operation not permitted"}, "mount_refused"},
 		{"mount accepted a write", readOnlyProbeRun{MountPoint: "/tmp/mnt"}, "write_accepted"},
 		{"mount could not be released", readOnlyProbeRun{MountPoint: "/tmp/mnt", WriteError: "read-only file system", UnmountError: "umount: /tmp/mnt: Resource busy"}, "unmount_failed"},
 	}

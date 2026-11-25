@@ -459,6 +459,22 @@ about the kernel), `helper_unavailable`, `mount_refused` (the kernel said no),
 `unmount_failed` (read-only was enforced and the mount is still live, with the
 command to release it in `reason`), and `enforced`.
 
+Those split into three groups, and a node agent has to treat the groups differently
+because maclet's fallback depends on the split holding. `enforced` is the only status
+that grants read-only. `not_attempted_os`, `helper_unavailable`, `mount_refused`,
+`write_accepted` and `unmount_failed` are verdicts *about this kernel*, and each is a
+refusal. `not_requested` and `mount_not_attempted_privilege` carry no verdict at all -
+nobody ran a mount - and maclet reads those two as "consult the unproven `volumes`
+answer rather than refuse", which is what stops a sudo-less node from declining `:ro`
+Pods it has no business declining. So the split is pinned in both directions: `sudo`
+absent, `sudo -n` wanting a password, and `sudo -n` unable to read one without a
+terminal all classify as `mount_not_attempted_privilege`, while a helper that reached
+the kernel and drew `Operation not permitted` classifies as `mount_refused` and never
+as a privilege problem. `TestReadOnlyProbeRunClassifiesEveryFailureMode` holds both
+halves. A new `probe_status` value will not appear without saying so in this section,
+because a gate that refuses on unrecognised statuses needs to know when the vocabulary
+changed.
+
 The probe retries the release up to three times with backoff, because a brand-new
 local mount on macOS can be held briefly by the node's own directory watchers, and
 one `EBUSY` must not decide a node's capability verdict while leaving a mount live

@@ -235,10 +235,16 @@ working around them:
   | --- | --- |
   | `devfs` (control) | mounted, then released |
   | `apfs`, `hfs`, `autofs`, `lifs` | `EINVAL` - registered, bad spec |
-  | `nfs` | errno 75 - registered, userspace data version rejected |
+  | `nfs` | `EPROGMISMATCH` - 75: Darwin's "program version mismatch", a versioned mount-data struct being rejected |
   | `bogusxyz` | `ENODEV` - 19 |
   | `null` | `ENODEV` - 19, byte-for-byte the answer a made-up name draws |
   | `nullfs` | `EPERM` - 1, three runs out of three |
+
+  Read the constant and not the integer, because the same number means different things on
+  the two OSes: `EINVAL` is 22 on both, 75 is `EPROGMISMATCH` on Darwin and `EOVERFLOW` on
+  Linux, and 45 is `ENOTSUP` on Darwin and `EL2NSYNC` on Linux - pi-ed checked that last one
+  from a Linux pod, which is the shape of the error that made "19 means not supported" look
+  plausible from there.
 
   `nullfs` is the only name in that table that draws a refusal other than "no such
   filesystem type", which is what Apple's source for this Darwin generation predicts:

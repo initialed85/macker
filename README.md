@@ -494,7 +494,7 @@ returns `EPERM` unless the calling task holds `com.apple.private.nullfs_allow`, 
 no fallback for root, while its unmount entry point accepts root. Measured on icarus-2
 (macOS 26.6.2) with `mount(2)` run as root: `devfs` mounts and releases through the
 same call form, `apfs`, `hfs`, `autofs` and `lifs` draw `EINVAL` for a bad spec, `nfs`
-draws a version error, a made-up name and the type `null` both draw errno 19, and
+draws `EPROGMISMATCH` (75 on Darwin, which Linux numbers as `EOVERFLOW`), a made-up name and the type `null` both draw errno 19, and
 `nullfs` draws `EPERM` - three runs, same answer. So the filesystem is present and
 policy-gated rather than absent, and the gate is one a third-party helper cannot
 satisfy. `nullfs` draws `EPERM` even with no mount data passed at all, so the refusal is

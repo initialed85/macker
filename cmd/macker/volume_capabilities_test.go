@@ -104,6 +104,10 @@ func TestReadOnlyMountGuidanceCarriesTheOperatorChecklist(t *testing.T) {
 		"no fallback for root",
 		"registered under the type name nullfs, not null",
 		"EPERM for nullfs",
+		// Named as a constant, not a bare number, because 75 is EPROGMISMATCH on
+		// Darwin and EOVERFLOW on Linux; a reader who compares integers across the two
+		// OSes gets a different meaning.
+		"EPROGMISMATCH (75, which Linux numbers as EOVERFLOW) for nfs",
 		// The two traps that produced the wrong conclusion the first time this was
 		// measured on this node. The first one names the errno correctly because an
 		// earlier revision of this text called 19 ENOTSUP on Darwin, which is false:

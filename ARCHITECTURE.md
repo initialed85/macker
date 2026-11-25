@@ -455,6 +455,15 @@ For this mode:
 - the resolved port is available as `MACKER_PORT_1` and in `inspect` JSON;
 - `____MACKER_PORT_1____` can be used in recognized config files such as nginx
   configuration;
+- maclet chooses the shape by Pod class rather than guessing: a Pod IP workload
+  gets `-p <containerPort>:auto/tcp|udp` (overlapping rollout generations would
+  otherwise collide on a host port), while a `hostNetwork` Pod or a Pod labelled
+  `k8s-darwin.dev/disable-port-forward` gets `--env MACKER_PORT_N=<containerPort>`
+  and no published port, because there the pod's port already is the host port.
+  maclet owns these Kubernetes-side rules and documents them, with measured
+  tables, in its `KUBERNETES-PARITY.md` under "Ports and Macker config tokens";
+  Macker only defines what a token resolves from and refuses a config that
+  resolves to nothing,
 - maclet can use `inspect --format json` to reconcile process and exit state;
 - maclet can use `macker platforms IMAGE --format json` before assigning an image,
   so a Linux-only pod is rejected as unsupported instead of failing inside a

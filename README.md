@@ -100,7 +100,14 @@ supplied the value. A port token needs a published port: `MACKER_PORT_1`,
 `MACKER_PORT_2`, and so on come from the first, second, and later `-p`
 mappings in flag order, so an image whose configuration carries port tokens
 must be run with at least that many `-p` mappings, or with
-`--env MACKER_PORT_N=PORT` supplied explicitly. Macker skips symlinks, binary-looking files,
+`--env MACKER_PORT_N=PORT` supplied explicitly. On a maclet node the two shapes
+are chosen by Pod class: a Pod IP workload gets `-p <containerPort>:auto/tcp`
+so PF can accept traffic at the Pod IP, while a `hostNetwork` Pod or a Pod
+labelled `k8s-darwin.dev/disable-port-forward` gets `--env MACKER_PORT_N=<containerPort>`
+and no published port, because there the pod's port already is the host port.
+maclet owns those Kubernetes-side rules and documents them, with measured tables,
+in maclet's `KUBERNETES-PARITY.md` under "Ports and Macker config tokens"; this
+document covers only what Macker does with the value. Macker skips symlinks, binary-looking files,
 and unlisted extensions, and only changes the per-container rootfs—not the
 stored image or host-backed volume targets. Direct `oci run` callers can supply
 values with repeated `--env` flags.

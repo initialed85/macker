@@ -1689,22 +1689,22 @@ func commandInspect(args []string) error {
 		fmt.Println(string(data))
 		return nil
 	case "table", "text":
-		fmt.Printf("Name: %s\\n", inspection.Name)
-		fmt.Printf("Image: %s\\n", inspection.Image)
-		fmt.Printf("Status: %s\\n", inspection.Status)
-		fmt.Printf("Working directory: %s\\n", valueOrDash(inspection.WorkingDir))
-		fmt.Printf("PID: %d\\n", inspection.PID)
-		fmt.Printf("Workload PID: %d\\n", inspection.WorkloadPID)
+		fmt.Printf("Name: %s\n", inspection.Name)
+		fmt.Printf("Image: %s\n", inspection.Image)
+		fmt.Printf("Status: %s\n", inspection.Status)
+		fmt.Printf("Working directory: %s\n", valueOrDash(inspection.WorkingDir))
+		fmt.Printf("PID: %d\n", inspection.PID)
+		fmt.Printf("Workload PID: %d\n", inspection.WorkloadPID)
 		if inspection.ExitCode == nil {
 			fmt.Println("Exit code: -")
 		} else {
-			fmt.Printf("Exit code: %d\\n", *inspection.ExitCode)
+			fmt.Printf("Exit code: %d\n", *inspection.ExitCode)
 		}
-		fmt.Printf("Started: %s\\n", inspectionTime(inspection.StartedAt))
-		fmt.Printf("Finished: %s\\n", inspectionTime(inspection.FinishedAt))
-		fmt.Printf("Termination signal: %s\\n", valueOrDash(inspection.TerminationSignal))
-		fmt.Printf("Termination reason: %s\\n", valueOrDash(inspection.TerminationReason))
-		fmt.Printf("Paused: %s\\n", inspectionTime(inspection.PausedAt))
+		fmt.Printf("Started: %s\n", inspectionTime(inspection.StartedAt))
+		fmt.Printf("Finished: %s\n", inspectionTime(inspection.FinishedAt))
+		fmt.Printf("Termination signal: %s\n", valueOrDash(inspection.TerminationSignal))
+		fmt.Printf("Termination reason: %s\n", valueOrDash(inspection.TerminationReason))
+		fmt.Printf("Paused: %s\n", inspectionTime(inspection.PausedAt))
 		if len(inspection.Volumes) == 0 {
 			fmt.Println("Volumes: -")
 		} else {
@@ -1713,7 +1713,7 @@ func commandInspect(args []string) error {
 				if mount.ReadOnly {
 					mode = "ro"
 				}
-				fmt.Printf("Volume: %s -> %s (%s)\\n", mount.HostPath, mount.ContainerPath, mode)
+				fmt.Printf("Volume: %s -> %s (%s)\n", mount.HostPath, mount.ContainerPath, mode)
 			}
 		}
 		return nil
